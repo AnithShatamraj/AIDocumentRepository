@@ -1,0 +1,28 @@
+MASTER SERVICES AGREEMENT
+
+This Master Services Agreement ("Agreement") is entered into by and between
+Northwind Traders ("Client") and Globex Consulting LLC ("Provider"), the parties
+hereto.
+
+Effective Date: January 1, 2026
+Expiration Date: December 31, 2026
+
+1. SERVICES. Provider shall provide professional consulting services as described
+in one or more Statements of Work.
+
+2. CONTRACT VALUE. The total value of this Agreement shall not exceed $250,000.00
+over the initial term.
+
+3. PAYMENT TERMS. Client shall pay all undisputed invoices within thirty (30) days
+of receipt (Net 30).
+
+4. GOVERNING LAW. This Agreement shall be governed by and construed in accordance
+with the laws of the State of Delaware.
+
+5. RENEWAL TERMS. This Agreement shall automatically renew for successive one-year
+terms unless either party provides sixty (60) days written notice of non-renewal.
+
+6. TERMINATION CLAUSE. Either party may terminate this Agreement for material breach
+upon thirty (30) days written notice if such breach remains uncured.
+
+IN WITNESS WHEREOF, the parties have executed this Agreement as of the Effective Date.

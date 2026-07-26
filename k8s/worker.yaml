@@ -1,0 +1,49 @@
+# Celery workers. Split into per-queue Deployments so resource profiles scale
+# independently (OCR is memory-heavy; LLM is rate-limit bound).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aidocs-worker-llm
+  namespace: aidocs
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: aidocs-worker-llm }
+  template:
+    metadata:
+      labels: { app: aidocs-worker-llm }
+    spec:
+      containers:
+        - name: worker
+          image: aidocs-backend:latest
+          command: ["celery", "-A", "app.worker.celery_app", "worker", "-Q", "q_llm", "--concurrency=4", "--loglevel=INFO"]
+          envFrom:
+            - configMapRef: { name: aidocs-config }
+            - secretRef: { name: aidocs-secrets }
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aidocs-worker-ocr
+  namespace: aidocs
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: aidocs-worker-ocr }
+  template:
+    metadata:
+      labels: { app: aidocs-worker-ocr }
+    spec:
+      containers:
+        - name: worker
+          image: aidocs-backend:latest
+          command: ["celery", "-A", "app.worker.celery_app", "worker", "-Q", "q_ocr,q_light", "--concurrency=2", "--loglevel=INFO"]
+          envFrom:
+            - configMapRef: { name: aidocs-config }
+            - secretRef: { name: aidocs-secrets }
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "2", memory: "3Gi" }

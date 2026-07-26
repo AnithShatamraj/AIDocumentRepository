@@ -1,0 +1,161 @@
+# AI Document Repository — local dev orchestration.
+#
+#   Infra only (recommended for dev; run React locally with `npm run dev`):
+#     docker compose up -d postgres redis minio minio-setup
+#
+#   Full stack (API + Celery worker + frontend in containers too):
+#     docker compose --profile apps up --build
+#
+# Postgres isn't installed on Windows hosts here, so the API + Celery run in
+# containers even in "dev". Infra is always available on localhost ports.
+
+name: aidocs
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16 # bundles pgvector >= 0.8 (HNSW + iterative scans)
+    # Credentials pinned here (not ${...}) so a polluted host shell can't override
+    # them via Compose substitution. Keep in sync with POSTGRES_* in .env.
+    environment:
+      POSTGRES_USER: aidocs
+      POSTGRES_PASSWORD: aidocs
+      POSTGRES_DB: aidocs
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aidocs -d aidocs"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # IBM Docling as an independent service (layout + bboxes + OCR for PDFs).
+  # Official prebuilt CPU image — models baked in, nothing to build locally.
+  # Scaled separately from Celery workers (see k8s/docling.yaml for prod).
+  docling:
+    image: ghcr.io/docling-project/docling-serve-cpu:latest
+    ports:
+      - "5001:5001"
+    environment:
+      DOCLING_SERVE_ENABLE_UI: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:5001/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # pdf.js in the browser fetches presigned URLs cross-origin (5173 -> 9000).
+      MINIO_API_CORS_ALLOW_ORIGIN: "*"
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Web console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: ensure the bucket exists.
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/aidocs &&
+      echo 'bucket ready';
+      "
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+    profiles: ["apps"]
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      DOCLING_URL: http://docling:5001
+    # Bind-mount source so uvicorn --reload picks up edits without a rebuild.
+    volumes:
+      - ./backend/app:/app/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    command: >
+      sh -c "python -m app.cli init-db &&
+             python -m app.cli seed &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    build:
+      context: ./backend
+    profiles: ["apps"]
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      DOCLING_URL: http://docling:5001
+    volumes:
+      - ./backend/app:/app/app
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A app.worker.celery_app worker
+      -Q q_ocr,q_llm,q_light --concurrency=2 --loglevel=INFO
+
+  frontend:
+    build:
+      context: ./frontend
+    profiles: ["apps"]
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

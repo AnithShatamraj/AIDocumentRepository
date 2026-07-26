@@ -1,0 +1,38 @@
+# Non-secret configuration. Point hosts at managed services in production
+# (Azure Database for PostgreSQL, Azure Cache for Redis, Azure Blob).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aidocs-config
+  namespace: aidocs
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  API_CORS_ORIGINS: "https://docs.example.com"
+  POSTGRES_HOST: "aidocs-pg.postgres.database.azure.com"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "aidocs"
+  REDIS_HOST: "aidocs-redis.redis.cache.windows.net"
+  REDIS_PORT: "6380"
+  STORAGE_PROVIDER: "azure"
+  STORAGE_BUCKET: "aidocs"
+  AZURE_STORAGE_ACCOUNT_URL: "https://aidocsblob.blob.core.windows.net"
+  AI_DEFAULT_PROVIDER: "openai"
+  EMBEDDING_PROVIDER: "openai"
+  EMBEDDING_MODEL: "text-embedding-3-small"
+  EMBEDDING_DIM: "1536"
+  INGESTION_USE_DEEPAGENTS: "true"
+---
+# Secrets are placeholders — inject via Azure Key Vault (CSI) or sealed-secrets.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aidocs-secrets
+  namespace: aidocs
+type: Opaque
+stringData:
+  SECRET_KEY: "REPLACE_WITH_LONG_RANDOM"
+  POSTGRES_USER: "aidocs"
+  POSTGRES_PASSWORD: "REPLACE"
+  OPENAI_API_KEY: "REPLACE"
+  AZURE_STORAGE_CONNECTION_STRING: ""

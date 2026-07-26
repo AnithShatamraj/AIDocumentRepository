@@ -1,0 +1,24 @@
+ACME SUPPLIES INC.
+123 Industrial Way, Springfield, IL
+
+INVOICE
+
+Invoice Number: INV-2026-00847
+Invoice Date: 03/15/2026
+Due Date: 04/14/2026
+Vendor: Acme Supplies Inc.
+Bill To: Northwind Traders
+
+Description                     Qty      Unit Price      Amount
+-----------------------------------------------------------------
+Steel brackets (pack of 50)      12         $45.00       $540.00
+Industrial adhesive (1L)          8         $22.50       $180.00
+Safety gloves (dozen)            20         $18.00       $360.00
+-----------------------------------------------------------------
+                                            Subtotal:  $1,080.00
+                                            Tax (8%):     $86.40
+                                            Total Due:  $1,166.40
+
+Currency: USD
+Payment terms: Net 30. Remit payment to Acme Supplies Inc.
+Thank you for your business.

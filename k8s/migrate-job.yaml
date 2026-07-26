@@ -1,0 +1,21 @@
+# Run once per release to ensure the pgvector extension, tables, and indexes.
+# In production, replace `init-db` with an Alembic `upgrade head` step.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aidocs-init-db
+  namespace: aidocs
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: init-db
+          image: aidocs-backend:latest
+          command: ["sh", "-c", "python -m app.cli init-db && python -m app.cli seed"]
+          envFrom:
+            - configMapRef:
+                name: aidocs-config
+            - secretRef:
+                name: aidocs-secrets

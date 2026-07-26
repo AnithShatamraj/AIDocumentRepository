@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aidocs-frontend
+  namespace: aidocs
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: aidocs-frontend }
+  template:
+    metadata:
+      labels: { app: aidocs-frontend }
+    spec:
+      containers:
+        - name: frontend
+          # Build a static image for prod (nginx serving `vite build` output).
+          image: aidocs-frontend:latest
+          ports:
+            - containerPort: 5173
+          resources:
+            requests: { cpu: "50m", memory: "128Mi" }
+            limits: { cpu: "250m", memory: "256Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aidocs-frontend
+  namespace: aidocs
+spec:
+  selector: { app: aidocs-frontend }
+  ports:
+    - port: 80
+      targetPort: 5173
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aidocs
+  namespace: aidocs
+  annotations:
+    # AKS Application Gateway / NGINX ingress. SSE needs buffering off.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+spec:
+  rules:
+    - host: docs.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: aidocs-api
+                port: { number: 80 }
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: aidocs-api
+                port: { number: 80 }
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: aidocs-frontend
+                port: { number: 80 }
