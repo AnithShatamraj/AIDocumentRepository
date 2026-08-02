@@ -15,7 +15,7 @@ export function Review() {
     queryFn: () => api.get(`/api/review?sort=${sort}`),
     refetchInterval: 6000,
   });
-  const { data: categories } = useQuery({ queryKey: ["categories"], queryFn: () => api.get("/api/categories") });
+  const { data: categories } = useQuery({ queryKey: ["document-types"], queryFn: () => api.get("/api/document-types") });
 
   async function select(item: any) {
     setSelected(item);
@@ -33,7 +33,7 @@ export function Review() {
     await api.post(`/api/review/${selected.id}/resolve`, {
       action,
       corrected_value: action === "modify" ? corrected : null,
-      category_ids: selected.kind === "classification" ? catIds : null,
+      document_type_ids: selected.kind === "classification" ? catIds : null,
     });
     setSelected(null);
     qc.invalidateQueries({ queryKey: ["review"] });

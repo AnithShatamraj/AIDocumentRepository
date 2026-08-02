@@ -1,4 +1,4 @@
-"""Documents, immutable versions, category assignments, and per-document ACLs."""
+"""Documents, immutable versions, document-type assignments, and per-document ACLs."""
 from __future__ import annotations
 
 import uuid
@@ -9,11 +9,13 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -22,17 +24,23 @@ from app.core.db import Base
 from app.models.base import TimestampMixin, uuid_pk
 from app.models.constants import DOC_PENDING
 
-# Many-to-many document <-> category (multi-label classification).
-document_category = Table(
-    "document_category",
+# Many-to-many document <-> document type (multi-label classification).
+document_type_links = Table(
+    "document_type_links",
     Base.metadata,
     Column("document_id", PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True),
-    Column("category_id", PGUUID(as_uuid=True), ForeignKey("categories.id", ondelete="CASCADE"), primary_key=True),
+    Column("document_type_id", PGUUID(as_uuid=True), ForeignKey("document_types.id", ondelete="CASCADE"), primary_key=True),
 )
 
 
 class Document(Base, TimestampMixin):
     __tablename__ = "documents"
+    __table_args__ = (
+        # Names are unique per tenant among live documents; deleted ones release
+        # their name (partial index, so soft-deleted rows don't block reuse).
+        Index("uq_document_tenant_name_live", "tenant_id", "name",
+              unique=True, postgresql_where=text("is_deleted = false")),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -52,6 +60,16 @@ class Document(Base, TimestampMixin):
     current_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     processing_status: Mapped[str] = mapped_column(String(32), default=DOC_PENDING, nullable=False, index=True)
 
+    # Set when this document's content matched an existing one. Derived artifacts
+    # are cloned from the original instead of re-running the (paid) pipeline.
+    duplicate_of_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+    # Type chosen by the uploader; null means "auto-detect".
+    requested_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("document_types.id", ondelete="SET NULL"), nullable=True
+    )
+
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     deleted_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -61,7 +79,8 @@ class Document(Base, TimestampMixin):
     versions: Mapped[list["DocumentVersion"]] = relationship(
         back_populates="document", cascade="all, delete-orphan", order_by="DocumentVersion.version"
     )
-    categories: Mapped[list["Category"]] = relationship("Category", secondary=document_category)
+    document_types: Mapped[list["DocumentType"]] = relationship(
+        "DocumentType", secondary=document_type_links)
     permissions: Mapped[list["DocumentPermission"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
@@ -132,17 +151,17 @@ class DocumentPermission(Base, TimestampMixin):
     document: Mapped["Document"] = relationship(back_populates="permissions")
 
 
-class CategoryDefaultPermission(Base, TimestampMixin):
-    """New documents in a category inherit these grants (e.g. Invoices -> Finance)."""
+class DocumentTypeDefaultPermission(Base, TimestampMixin):
+    """New documents of a type inherit these grants (e.g. Invoices -> Finance)."""
 
-    __tablename__ = "category_default_permissions"
+    __tablename__ = "document_type_default_permissions"
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    category_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("categories.id", ondelete="CASCADE"), nullable=False, index=True
+    document_type_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("document_types.id", ondelete="CASCADE"), nullable=False, index=True
     )
     group_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("groups.id", ondelete="CASCADE"), nullable=True

@@ -1,20 +1,20 @@
 """Import all models so SQLAlchemy metadata is fully populated."""
 from app.models.base import TimestampMixin, uuid_pk  # noqa: F401
 from app.models.tenant import Group, Tenant, User, user_group  # noqa: F401
-from app.models.catalog import Category, ExtractionSchema  # noqa: F401
+from app.models.catalog import DocumentType, TypeSchema  # noqa: F401
 from app.models.document import (  # noqa: F401
-    CategoryDefaultPermission,
     Document,
     DocumentPermission,
+    DocumentTypeDefaultPermission,
     DocumentVersion,
-    document_category,
+    document_type_links,
 )
 from app.models.pipeline import PipelineRun, PipelineStage  # noqa: F401
 from app.models.content import (  # noqa: F401
     Chunk,
     Classification,
     Embedding,
-    Extraction,
+    FieldValue,
     Summary,
 )
 from app.models.review import ReviewItem  # noqa: F401
@@ -32,20 +32,20 @@ __all__ = [
     "User",
     "Group",
     "user_group",
-    "Category",
-    "ExtractionSchema",
+    "DocumentType",
+    "TypeSchema",
     "Document",
     "DocumentVersion",
     "DocumentPermission",
-    "CategoryDefaultPermission",
-    "document_category",
+    "DocumentTypeDefaultPermission",
+    "document_type_links",
     "PipelineRun",
     "PipelineStage",
     "Chunk",
     "Embedding",
     "Summary",
     "Classification",
-    "Extraction",
+    "FieldValue",
     "ReviewItem",
     "Conversation",
     "Message",

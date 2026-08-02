@@ -67,13 +67,13 @@ export function Dashboard() {
           <h2>Documents by Category</h2>
           <table>
             <tbody>
-              {Object.entries(data.documents_by_category || {}).map(([k, v]) => (
+              {Object.entries(data.documents_by_type || {}).map(([k, v]) => (
                 <tr key={k}>
                   <td>{k}</td>
                   <td style={{ textAlign: "right" }}>{v as number}</td>
                 </tr>
               ))}
-              {Object.keys(data.documents_by_category || {}).length === 0 && (
+              {Object.keys(data.documents_by_type || {}).length === 0 && (
                 <tr><td className="muted">No categorized documents yet.</td></tr>
               )}
             </tbody>

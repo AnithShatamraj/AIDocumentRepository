@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import client_ip, get_current_user, require_reviewer
 from app.core.config import settings
 from app.core.db import get_db
-from app.models.catalog import Category
+from app.models.catalog import DocumentType
 from app.models.constants import (
     AUDIT_DELETE,
     AUDIT_DOWNLOAD,
@@ -24,7 +24,9 @@ from app.models.constants import (
     DOC_NEEDS_REVIEW,
     DOC_PENDING,
     DOC_PROCESSED,
+    NOTIFY_DUPLICATE_UPLOAD,
     PERM_DELETE,
+    PERM_READ,
     PERM_MANAGE,
     PERM_UPDATE,
     PIPELINE_STAGES,
@@ -32,12 +34,12 @@ from app.models.constants import (
     RV_REJECTED,
     RV_VERIFIED,
 )
-from app.models.content import Classification, Extraction, Summary
+from app.models.content import Classification, FieldValue, Summary
 from app.models.document import Document, DocumentVersion
 from app.models.review import ReviewItem
 from app.models.tenant import User
 from app.schemas import DocumentDetail, DocumentOut, ExtractionReview, PresignedUrl
-from app.services import audit, mime, permissions
+from app.services import audit, ingest_policy, mime, permissions
 from app.services.hashing import sha256_hex
 from app.storage import get_storage
 
@@ -49,19 +51,76 @@ def _storage_key(tenant_id, document_id, version, filename) -> str:
     return f"tenant/{tenant_id}/doc/{document_id}/v{version}/{filename}"
 
 
-async def _create_document(db, user, filename, data, description) -> tuple[Document, dict]:
+def _field_dict(e: FieldValue) -> dict:
+    return {
+        "id": str(e.id), "field_key": e.field_key, "field_path": e.field_path,
+        "field_name": e.field_name, "node_kind": e.node_kind, "data_type": e.data_type,
+        "ordinal": e.ordinal, "is_discovered": e.is_discovered,
+        "raw_value": e.raw_value, "value_type": e.value_type, "value_text": e.value_text,
+        "value_number": e.value_number,
+        "value_date": e.value_date.isoformat() if e.value_date else None,
+        "value_datetime": e.value_datetime.isoformat() if e.value_datetime else None,
+        "value_time": e.value_time.isoformat() if e.value_time else None,
+        "value_boolean": e.value_boolean, "value_currency": e.value_currency,
+        "confidence": e.confidence, "review_status": e.review_status,
+        "source_page": e.source_page, "source_text": e.source_text, "source_bbox": e.source_bbox,
+        "children": [],
+    }
+
+
+def _build_field_tree(rows: list[FieldValue]) -> list[dict]:
+    """Assemble the nested tree from one flat SELECT (no recursive queries)."""
+    nodes = {r.id: _field_dict(r) for r in rows}
+    roots: list[dict] = []
+    for r in rows:
+        node = nodes[r.id]
+        parent = nodes.get(r.parent_id) if r.parent_id else None
+        (parent["children"] if parent else roots).append(node)
+    def order(items: list[dict]) -> list[dict]:
+        # Schema fields first (in schema order), discovered entities after them.
+        items.sort(key=lambda n: (n["is_discovered"],
+                                  n["ordinal"] if n["ordinal"] is not None else 0,
+                                  n["field_path"]))
+        for n in items:
+            order(n["children"])
+        return items
+    return order(roots)
+
+
+class NameConflict(Exception):
+    def __init__(self, name: str, suggestion: str):
+        self.name, self.suggestion = name, suggestion
+
+
+async def _create_document(db, user, filename, data, description, *, name=None,
+                           document_type_id=None) -> tuple[Document, dict]:
+    """Create a document, honouring name uniqueness and the duplicate policy.
+
+    Returns (document, meta). `meta["action"]` is one of:
+      linked_existing  — content already present and readable; no new document
+      cloned           — new document, derived artifacts copied (no AI cost)
+      new              — fresh document, pipeline will run
+    """
     ext, mime_type = mime.validate(filename, data, settings.max_upload_mb * 1024 * 1024)
     content_hash = sha256_hex(data)
+    display_name = (name or filename).strip()
 
-    dup = (await db.execute(
-        select(Document).where(Document.tenant_id == user.tenant_id, Document.content_hash == content_hash,
-                               Document.is_deleted.is_(False))
-    )).scalars().first()
+    if await ingest_policy.name_taken(db, user.tenant_id, display_name):
+        raise NameConflict(display_name,
+                           await ingest_policy.suggest_name(db, user.tenant_id, display_name))
+
+    dup, readable = await ingest_policy.find_duplicate(db, user, content_hash)
+
+    # Readable duplicate + duplicates disallowed -> just grant access, don't copy.
+    if dup is not None and readable and not await ingest_policy.allow_duplicates(db, user.tenant_id):
+        await _grant_read(db, user, dup)
+        return dup, {"action": "linked_existing", "duplicate_of": str(dup.id),
+                     "message": f"This file already exists as '{dup.name}'. You now have access to it."}
 
     doc = Document(
-        tenant_id=user.tenant_id, owner_id=user.id, name=filename, description=description,
+        tenant_id=user.tenant_id, owner_id=user.id, name=display_name, description=description,
         file_type=ext, mime_type=mime_type, file_size=len(data), content_hash=content_hash,
-        current_version=1, processing_status=DOC_PENDING)
+        current_version=1, processing_status=DOC_PENDING, requested_type_id=document_type_id)
     db.add(doc)
     await db.flush()
 
@@ -71,7 +130,49 @@ async def _create_document(db, user, filename, data, description) -> tuple[Docum
         tenant_id=user.tenant_id, document_id=doc.id, version=1, storage_key=key,
         file_size=len(data), content_hash=content_hash, mime_type=mime_type, uploaded_by=user.id))
     await db.flush()
-    return doc, {"duplicate_of": str(dup.id) if dup else None}
+
+    # Identical content already processed? Copy its results instead of paying to
+    # redo them. Done for unreadable duplicates too — the uploader is never told
+    # the other document exists, they simply get their own fully-processed copy.
+    if dup is not None and dup.processing_status in (DOC_PROCESSED, DOC_NEEDS_REVIEW):
+        counts = await ingest_policy.clone_derived_artifacts(db, dup, doc)
+        meta = {"action": "cloned", "reused": counts}
+        if readable:
+            meta["duplicate_of"] = str(dup.id)
+            meta["message"] = f"Identical to '{dup.name}' — reused its processing results."
+        return doc, meta
+
+    return doc, {"action": "new", "duplicate_of": str(dup.id) if (dup and readable) else None}
+
+
+async def _grant_read(db, user, doc: Document) -> None:
+    from app.models.document import DocumentPermission
+
+    exists = (await db.execute(
+        select(DocumentPermission.id).where(
+            DocumentPermission.document_id == doc.id, DocumentPermission.user_id == user.id).limit(1)
+    )).first()
+    if not exists and doc.owner_id != user.id:
+        db.add(DocumentPermission(tenant_id=doc.tenant_id, document_id=doc.id,
+                                  user_id=user.id, level=PERM_READ))
+    # Tell the people responsible for the document — not every user, which would
+    # disclose the document to people who cannot see it.
+    from app.models.ops import Notification
+
+    managers = {doc.owner_id}
+    for (uid,) in (await db.execute(
+        select(DocumentPermission.user_id).where(
+            DocumentPermission.document_id == doc.id,
+            DocumentPermission.level == PERM_MANAGE))).all():
+        if uid:
+            managers.add(uid)
+    for uid in managers:
+        if uid and uid != user.id:
+            db.add(Notification(
+                tenant_id=doc.tenant_id, user_id=uid, kind=NOTIFY_DUPLICATE_UPLOAD,
+                title="Duplicate upload",
+                body=f"{user.email} uploaded a file identical to '{doc.name}' and was granted access.",
+                link=f"/documents/{doc.id}"))
 
 
 def _trigger_pipeline(document_id, from_stage=None):
@@ -80,23 +181,50 @@ def _trigger_pipeline(document_id, from_stage=None):
     start_processing.delay(str(document_id), from_stage, str(uuid.uuid4()))
 
 
+@router.get("/name-available")
+async def name_available(name: str = Query(...), user: User = Depends(get_current_user),
+                         db: AsyncSession = Depends(get_db)):
+    """Live check for the upload dialog."""
+    taken = await ingest_policy.name_taken(db, user.tenant_id, name)
+    return {"name": name, "available": not taken,
+            "suggestion": (await ingest_policy.suggest_name(db, user.tenant_id, name)) if taken else None}
+
+
 @router.post("", response_model=dict, status_code=201)
 async def upload(
     request: Request,
     file: UploadFile = File(...),
     description: str = Form(""),
+    name: str | None = Form(default=None),
+    document_type_id: str | None = Form(default=None),  # omit / "auto" = auto-detect
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     data = await file.read()
+    type_id = None
+    if document_type_id and document_type_id != "auto":
+        dt = await db.get(DocumentType, document_type_id)
+        if not dt or dt.tenant_id != user.tenant_id:
+            raise HTTPException(400, "Unknown document type")
+        type_id = dt.id
     try:
-        doc, meta = await _create_document(db, user, file.filename, data, description)
+        doc, meta = await _create_document(db, user, file.filename, data, description,
+                                           name=name, document_type_id=type_id)
     except mime.UploadValidationError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except NameConflict as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, {
+            "code": "NAME_TAKEN",
+            "message": f"A document named '{e.name}' already exists. Choose another name.",
+            "suggestion": e.suggestion})
+
     await audit.log_event(db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_UPLOAD,
-                          object_type="document", object_id=doc.id, ip_address=client_ip(request), commit=False)
+                          object_type="document", object_id=doc.id,
+                          detail={"action": meta.get("action")}, ip_address=client_ip(request), commit=False)
     await db.commit()
-    _trigger_pipeline(doc.id)
+    # Only fresh content needs the (paid) pipeline; clones and links reuse results.
+    if meta.get("action") == "new":
+        _trigger_pipeline(doc.id)
     return {"document": DocumentOut.model_validate(doc).model_dump(), **meta}
 
 
@@ -113,14 +241,26 @@ async def bulk_upload(
         try:
             doc, meta = await _create_document(db, user, f.filename, data, "")
             await audit.log_event(db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_UPLOAD,
-                                  object_type="document", object_id=doc.id, commit=False)
+                                  object_type="document", object_id=doc.id,
+                                  detail={"action": meta.get("action")}, commit=False)
             await db.commit()
-            _trigger_pipeline(doc.id)
+            if meta.get("action") == "new":
+                _trigger_pipeline(doc.id)
             results.append({"filename": f.filename, "status": "accepted", "document_id": str(doc.id),
-                            "duplicate_of": meta["duplicate_of"]})
+                            "action": meta.get("action"), "duplicate_of": meta.get("duplicate_of"),
+                            "message": meta.get("message")})
         except mime.UploadValidationError as e:
             await db.rollback()
             results.append({"filename": f.filename, "status": "rejected", "error": str(e)})
+        except NameConflict as e:
+            # Bulk upload shouldn't stall on a name clash — take the suggestion.
+            await db.rollback()
+            doc, meta = await _create_document(db, user, f.filename, data, "", name=e.suggestion)
+            await db.commit()
+            if meta.get("action") == "new":
+                _trigger_pipeline(doc.id)
+            results.append({"filename": f.filename, "status": "accepted", "document_id": str(doc.id),
+                            "action": meta.get("action"), "renamed_to": e.suggestion})
     return {"results": results}
 
 
@@ -153,27 +293,24 @@ async def get_document(document_id: str, request: Request, user: User = Depends(
         select(Summary).where(Summary.document_id == doc.id, Summary.document_version == doc.current_version)
     )).scalars().first()
     extractions = (await db.execute(
-        select(Extraction).where(Extraction.document_id == doc.id, Extraction.document_version == doc.current_version)
+        select(FieldValue).where(FieldValue.document_id == doc.id, FieldValue.document_version == doc.current_version)
     )).scalars().all()
     classifications = (await db.execute(
         select(Classification).where(Classification.document_id == doc.id)
     )).scalars().all()
-    await db.refresh(doc, attribute_names=["categories"])
+    await db.refresh(doc, attribute_names=["document_types"])
     await audit.log_event(db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_VIEW,
                           object_type="document", object_id=doc.id, ip_address=client_ip(request))
 
     detail = DocumentDetail.model_validate(doc).model_dump()
-    detail["categories"] = [{"id": str(c.id), "name": c.name, "description": c.description,
+    detail["document_types"] = [{"id": str(c.id), "name": c.name, "description": c.description,
                              "is_enabled": c.is_enabled, "active_schema_id": str(c.active_schema_id) if c.active_schema_id else None}
-                            for c in doc.categories]
+                            for c in doc.document_types]
     detail["summary"] = ({"executive_summary": summary.executive_summary, "highlights": summary.highlights,
                           "model_version": summary.model_version} if summary else None)
-    detail["extractions"] = [{
-        "id": str(e.id), "field_name": e.field_name, "raw_value": e.raw_value, "value_type": e.value_type,
-        "value_text": e.value_text, "value_number": e.value_number,
-        "value_date": e.value_date.isoformat() if e.value_date else None, "value_currency": e.value_currency,
-        "confidence": e.confidence, "review_status": e.review_status, "source_page": e.source_page,
-        "source_text": e.source_text, "source_bbox": e.source_bbox} for e in extractions]
+    detail["fields"] = _build_field_tree(extractions)
+    # Back-compat alias for older clients that read a flat list.
+    detail["extractions"] = [_field_dict(e) for e in extractions if e.node_kind == "scalar"]
     detail["classifications"] = [{"label": c.label, "confidence": c.confidence, "source": c.source,
                                   "is_override": c.is_override} for c in classifications]
     return detail
@@ -257,10 +394,10 @@ async def page_image(document_id: str, page_no: int, version: int | None = Query
                     headers={"Cache-Control": "private, max-age=3600"})
 
 
-@router.post("/{document_id}/extractions/{extraction_id}/review")
+@router.post("/{document_id}/extractions/{field_value_id}/review")
 async def review_extraction(
     document_id: str,
-    extraction_id: str,
+    field_value_id: str,
     body: ExtractionReview,
     user: User = Depends(require_reviewer),
     db: AsyncSession = Depends(get_db),
@@ -276,15 +413,15 @@ async def review_extraction(
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
         raise HTTPException(404, "Document not found")
-    ext = await db.get(Extraction, extraction_id)
+    ext = await db.get(FieldValue, field_value_id)
     if not ext or str(ext.document_id) != str(doc.id):
-        raise HTTPException(404, "Extraction not found")
+        raise HTTPException(404, "FieldValue not found")
 
     ext.review_status = RV_VERIFIED if body.action == "accept" else RV_REJECTED
 
     # Resolve the queue item that was raised for this field, if any.
     item = (await db.execute(
-        select(ReviewItem).where(ReviewItem.extraction_id == ext.id, ReviewItem.status == RV_PENDING)
+        select(ReviewItem).where(ReviewItem.field_value_id == ext.id, ReviewItem.status == RV_PENDING)
     )).scalars().first()
     now = dt.datetime.now(dt.timezone.utc)
     if item:

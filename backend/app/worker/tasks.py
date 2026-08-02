@@ -17,13 +17,13 @@ import uuid
 from celery import chain
 from sqlalchemy import delete, select
 
-from app.ai import ingestion
+from app.ai import ingestion, prompts
 from app.ai.registry import get_embedder
 from app.core.config import settings
 from app.core.db import SyncSessionLocal
 from app.core.logging import correlation_id, get_logger
 from app.core.redis import publish_doc_event
-from app.models.catalog import Category, ExtractionSchema
+from app.models.catalog import DocumentType, TypeSchema
 from app.models.constants import (
     DOC_FAILED,
     DOC_NEEDS_REVIEW,
@@ -51,13 +51,13 @@ from app.models.constants import (
     STAGE_UNDERSTAND,
     VT_TEXT,
 )
-from app.models.content import Chunk, Classification, Embedding, Extraction, Summary
+from app.models.content import Chunk, Classification, Embedding, FieldValue, Summary
 from app.models.document import (
-    CategoryDefaultPermission,
+    DocumentTypeDefaultPermission,
     Document,
     DocumentPermission,
     DocumentVersion,
-    document_category,
+    document_type_links,
 )
 from app.models.ops import CostRecord, Notification
 from app.models.pipeline import PipelineRun, PipelineStage
@@ -259,17 +259,34 @@ def stage_classification(self, run_id: str) -> str:
     def work(db, run, stage):
         version = _latest_version(db, run.document_id, run.document_version)
         text = version.extracted_text or ""
+        doc = db.get(Document, run.document_id)
+
+        # Idempotent: clear prior AI classifications + type links for this doc.
+        db.execute(delete(Classification).where(
+            Classification.document_id == run.document_id, Classification.source == "ai"))
+        db.execute(document_type_links.delete().where(
+            document_type_links.c.document_id == run.document_id))
+
+        # The uploader pinned a type -> honour it and skip prediction entirely.
+        if doc.requested_type_id:
+            chosen = db.get(DocumentType, doc.requested_type_id)
+            if chosen is not None:
+                db.add(Classification(
+                    tenant_id=run.tenant_id, document_id=run.document_id,
+                    document_type_id=chosen.id, label=chosen.name, confidence=1.0,
+                    source="human", is_override=True))
+                db.execute(document_type_links.insert().values(
+                    document_id=run.document_id, document_type_id=chosen.id))
+                _apply_type_defaults(db, run.tenant_id, run.document_id, chosen.id)
+                return {"labels": [{"category": chosen.name, "confidence": 1.0}],
+                        "assigned": [chosen.name], "skip_extraction": False,
+                        "strategy": "user_selected"}
+
         cats = db.execute(
-            select(Category).where(Category.tenant_id == run.tenant_id, Category.is_enabled.is_(True))
+            select(DocumentType).where(DocumentType.tenant_id == run.tenant_id, DocumentType.is_enabled.is_(True))
         ).scalars().all()
         cat_by_name = {c.name: c for c in cats}
         result = ingestion.classify_document(text, list(cat_by_name.keys()))
-
-        # Idempotent: clear prior AI classifications + category links for this doc.
-        db.execute(delete(Classification).where(
-            Classification.document_id == run.document_id, Classification.source == "ai"))
-        db.execute(document_category.delete().where(
-            document_category.c.document_id == run.document_id))
 
         threshold = settings.classify_confidence_threshold
         assigned = []
@@ -277,12 +294,12 @@ def stage_classification(self, run_id: str) -> str:
             cat = cat_by_name.get(lab.category)
             db.add(Classification(
                 tenant_id=run.tenant_id, document_id=run.document_id,
-                category_id=cat.id if cat else None, label=lab.category, confidence=lab.confidence,
+                document_type_id=cat.id if cat else None, label=lab.category, confidence=lab.confidence,
                 source="ai", model_version=result.model, prompt_version=result.prompt_version))
             if cat and lab.confidence >= threshold:
-                db.execute(document_category.insert().values(
-                    document_id=run.document_id, category_id=cat.id))
-                _apply_category_defaults(db, run.tenant_id, run.document_id, cat.id)
+                db.execute(document_type_links.insert().values(
+                    document_id=run.document_id, document_type_id=cat.id))
+                _apply_type_defaults(db, run.tenant_id, run.document_id, cat.id)
                 assigned.append(lab.category)
 
         stage.model_version = result.model
@@ -329,61 +346,25 @@ def stage_metadata(self, run_id: str) -> str:
         text = version.extracted_text or ""
         layout_units = (version.understanding or {}).get("units", [])
         assigned_cats = db.execute(
-            select(Category).join(document_category, document_category.c.category_id == Category.id)
-            .where(document_category.c.document_id == run.document_id)
+            select(DocumentType).join(document_type_links, document_type_links.c.document_type_id == DocumentType.id)
+            .where(document_type_links.c.document_id == run.document_id)
         ).scalars().all()
 
         if not assigned_cats:  # low-confidence path: extraction skipped
             stage.status = ST_SKIPPED
             return {"skipped": True, "reason": "uncategorized"}
 
-        db.execute(delete(Extraction).where(
-            Extraction.document_id == run.document_id, Extraction.document_version == run.document_version))
+        db.execute(delete(FieldValue).where(
+            FieldValue.document_id == run.document_id, FieldValue.document_version == run.document_version))
 
-        autoaccept = settings.extract_autoaccept_threshold
         total_fields, review_items = 0, 0
         for cat in assigned_cats:
-            schema = db.get(ExtractionSchema, cat.active_schema_id) if cat.active_schema_id else None
+            schema = db.get(TypeSchema, cat.active_schema_id) if cat.active_schema_id else None
             if not schema or not schema.fields:
                 continue
-            fields = schema.fields
-            result = ingestion.extract_fields(text, fields, cat.name)
-            stage.model_version = result.model
-            stage.prompt_version = result.prompt_version
-            _record_cost(db, run, STAGE_METADATA, result)
-            type_by_name = {f["name"]: f.get("type", VT_TEXT) for f in fields}
-
-            for fe in result.fields:
-                norm = normalize.normalize(fe.raw_value, type_by_name.get(fe.name, VT_TEXT))
-                conf = fe.confidence * (1.0 if norm.ok else 0.6)  # normalization failure lowers confidence
-                status = RV_AUTO_ACCEPTED if conf >= autoaccept and fe.raw_value else RV_PENDING
-                # Locate the source region in the layout for viewer highlighting.
-                # Fall back to the value itself when the quoted span doesn't land.
-                loc = bbox_locator.locate_any(layout_units, [fe.source_text, fe.raw_value], fe.page)
-                # Trust the located page over the model's guess when we actually
-                # found the text — models routinely report page 1 for everything.
-                located_page = loc.get("page") if (loc and loc.get("rects")) else None
-                ext = Extraction(
-                    tenant_id=run.tenant_id, document_id=run.document_id,
-                    document_version=run.document_version, category_id=cat.id, field_name=fe.name,
-                    raw_value=fe.raw_value, value_type=norm.value_type, value_text=norm.value_text,
-                    value_number=norm.value_number, value_date=norm.value_date,
-                    value_currency=norm.value_currency, confidence=round(conf, 3),
-                    source_page=located_page or fe.page or (loc.get("page") if loc else None),
-                    source_text=fe.source_text, source_bbox=loc, review_status=status,
-                    model_version=result.model, prompt_version=result.prompt_version,
-                    schema_version=schema.version)
-                db.add(ext)
-                db.flush()
-                total_fields += 1
-                if status == RV_PENDING:
-                    db.add(ReviewItem(
-                        tenant_id=run.tenant_id, document_id=run.document_id, kind=REVIEW_EXTRACTION,
-                        extraction_id=ext.id, field_name=fe.name, confidence=round(conf, 3),
-                        status=RV_PENDING,
-                        payload={"category": cat.name, "raw_value": fe.raw_value,
-                                 "normalized_ok": norm.ok}))
-                    review_items += 1
+            counts = _extract_for_type(db, run, stage, cat, schema, text, layout_units)
+            total_fields += counts[0]
+            review_items += counts[1]
 
         if review_items:
             doc = db.get(Document, run.document_id)
@@ -465,13 +446,125 @@ def stage_embedding(self, run_id: str) -> str:
     return _run_stage(self, run_id, STAGE_EMBED, work)
 
 
-# -------------------------------------------------------- category default ACLs
-def _apply_category_defaults(db, tenant_id, document_id, category_id) -> None:
-    """Materialize category-level default grants onto the document so retrieval
+# ------------------------------------------------------- schema-driven extract
+# Legacy value_type names the normalizer understands, keyed by schema data_type.
+_NORMALIZER_TYPE = {
+    "string": VT_TEXT, "number": "numeric", "integer": "numeric", "currency": "currency",
+    "date": "date", "datetime": "date", "time": VT_TEXT, "boolean": VT_TEXT,
+}
+
+
+def _threshold_for(field_key: str, default: float, overrides: dict) -> float:
+    return float(overrides.get(field_key, default))
+
+
+def _extract_for_type(db, run, stage, doc_type, schema, text, layout_units) -> tuple[int, int]:
+    """Extract one document type's field tree into `field_values` rows."""
+    from app.ai.agents.structured import discover_entities, extract_structured
+    from app.services import fields as fieldsvc
+
+    defs = fieldsvc.validate_schema(schema.fields)
+    payload, usage = extract_structured(text, defs, doc_type.name)
+    stage.model_version = usage.model
+    stage.prompt_version = prompts.PROMPT_VERSIONS["extract"]
+    _record_cost(db, run, STAGE_METADATA, usage)
+
+    tree = fieldsvc.flatten_response(defs, payload)
+    autoaccept = settings.extract_autoaccept_threshold
+    written = review_items = 0
+
+    def persist(node: fieldsvc.FlatValue, parent_id) -> None:
+        nonlocal written, review_items
+        is_leaf = node.node_kind == "scalar"
+        norm = None
+        conf = node.confidence
+        status = RV_AUTO_ACCEPTED
+        loc = None
+
+        if is_leaf:
+            norm = normalize.normalize(node.raw_value, _NORMALIZER_TYPE.get(node.data_type, VT_TEXT))
+            # A value we couldn't normalize is less trustworthy.
+            conf = node.confidence * (1.0 if norm.ok else 0.6)
+            threshold = node.threshold if node.threshold is not None else autoaccept
+            status = RV_AUTO_ACCEPTED if (conf >= threshold and node.raw_value) else RV_PENDING
+            # Per-leaf provenance: the model's quote first, the value as fallback.
+            loc = bbox_locator.locate_any(layout_units, [node.quote, node.raw_value], None)
+
+        row = FieldValue(
+            id=uuid.uuid5(uuid.NAMESPACE_URL,
+                          f"{run.document_id}:{run.document_version}:{node.field_path}"),
+            tenant_id=run.tenant_id, document_id=run.document_id,
+            document_version=run.document_version, document_type_id=doc_type.id,
+            parent_id=parent_id, field_key=node.field_key, field_path=node.field_path,
+            field_name=node.name, node_kind=node.node_kind, ordinal=node.ordinal,
+            data_type=node.data_type,
+            raw_value=node.raw_value,
+            value_type=(norm.value_type if norm else node.data_type),
+            value_text=(norm.value_text if norm else None),
+            value_number=(norm.value_number if norm else None),
+            value_date=(norm.value_date if norm else None),
+            value_currency=(norm.value_currency if norm else None),
+            confidence=round(conf, 3),
+            source_page=(loc.get("page") if loc else None),
+            source_text=node.quote, source_bbox=loc,
+            review_status=status, model_version=usage.model,
+            prompt_version=prompts.PROMPT_VERSIONS["extract"], schema_version=schema.version)
+        db.add(row)
+        db.flush()
+
+        if is_leaf:
+            written += 1
+            if status == RV_PENDING:
+                db.add(ReviewItem(
+                    tenant_id=run.tenant_id, document_id=run.document_id, kind=REVIEW_EXTRACTION,
+                    field_value_id=row.id, field_name=node.field_path, confidence=round(conf, 3),
+                    status=RV_PENDING,
+                    payload={"document_type": doc_type.name, "field_path": node.field_path,
+                             "raw_value": node.raw_value,
+                             "normalized_ok": bool(norm.ok) if norm else None}))
+                review_items += 1
+
+        for child in node.children:
+            persist(child, row.id)
+
+    for node in tree:
+        persist(node, None)
+
+    # --- discovery pass: salient facts the schema doesn't cover ("Entities") ---
+    try:
+        known = [d.name for d in defs]
+        entities, disc_usage = discover_entities(text, known, doc_type.name)
+        _record_cost(db, run, STAGE_METADATA, disc_usage)
+        for i, ent in enumerate(entities):
+            key = fieldsvc.slugify_key(ent["name"])
+            path = f"_discovered.{key}"
+            loc = bbox_locator.locate_any(layout_units, [ent.get("quote"), ent["value"]], None)
+            norm = normalize.normalize(ent["value"], VT_TEXT)
+            db.add(FieldValue(
+                id=uuid.uuid5(uuid.NAMESPACE_URL,
+                              f"{run.document_id}:{run.document_version}:{path}"),
+                tenant_id=run.tenant_id, document_id=run.document_id,
+                document_version=run.document_version, document_type_id=doc_type.id,
+                field_key=key, field_path=path, field_name=ent["name"], node_kind="scalar",
+                ordinal=i, data_type="string", raw_value=ent["value"], value_type=VT_TEXT,
+                value_text=norm.value_text, confidence=round(float(ent["confidence"]), 3),
+                source_page=(loc.get("page") if loc else None), source_text=ent.get("quote"),
+                source_bbox=loc, review_status=RV_PENDING, model_version=disc_usage.model,
+                prompt_version=prompts.PROMPT_VERSIONS["extract"], schema_version=schema.version,
+                is_discovered=True))
+    except Exception as e:  # noqa: BLE001  discovery is best-effort
+        log.warning("entity_discovery_failed", error=str(e)[:200])
+
+    return written, review_items
+
+
+# ------------------------------------------------------ type default ACLs
+def _apply_type_defaults(db, tenant_id, document_id, document_type_id) -> None:
+    """Materialize type-level default grants onto the document so retrieval
     stays a single ACL join. Explicit per-document grants still override."""
     defaults = db.execute(
-        select(CategoryDefaultPermission).where(
-            CategoryDefaultPermission.category_id == category_id)
+        select(DocumentTypeDefaultPermission).where(
+            DocumentTypeDefaultPermission.document_type_id == document_type_id)
     ).scalars().all()
     for d in defaults:
         exists = db.execute(

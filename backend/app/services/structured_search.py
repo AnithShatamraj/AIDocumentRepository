@@ -7,7 +7,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.constants import RV_AUTO_ACCEPTED, RV_CORRECTED, RV_VERIFIED
-from app.models.content import Extraction
+from app.models.content import FieldValue
 from app.models.document import Document
 from app.models.tenant import User
 from app.services import permissions
@@ -23,7 +23,7 @@ async def query(
     op: str = "eq",  # eq | contains | gt | lt | gte | lte | before | after | between
     value: str | None = None,
     value2: str | None = None,
-    category_id=None,
+    document_type_id=None,
     verified_only: bool = False,
     limit: int = 100,
 ) -> list[dict]:
@@ -32,21 +32,21 @@ async def query(
 
     filters = [cond]
     if field_name:
-        filters.append(Extraction.field_name == field_name)
-    if category_id:
-        filters.append(Extraction.category_id == category_id)
+        filters.append(FieldValue.field_name == field_name)
+    if document_type_id:
+        filters.append(FieldValue.document_type_id == document_type_id)
     if verified_only:
-        filters.append(Extraction.review_status.in_(_VERIFIED_STATES))
-    filters.append(Extraction.document_version == Document.current_version)
+        filters.append(FieldValue.review_status.in_(_VERIFIED_STATES))
+    filters.append(FieldValue.document_version == Document.current_version)
 
     if value is not None and op:
         filters.append(_value_filter(op, value, value2))
 
     stmt = (
-        select(Extraction, Document.name)
-        .join(Document, Document.id == Extraction.document_id)
+        select(FieldValue, Document.name)
+        .join(Document, Document.id == FieldValue.document_id)
         .where(and_(*filters))
-        .order_by(Extraction.document_id)
+        .order_by(FieldValue.document_id)
         .limit(limit)
     )
     rows = await db.execute(stmt)
@@ -68,24 +68,24 @@ def _value_filter(op: str, value: str, value2: str | None):
     d = _try_date(value)
     n = _try_number(value)
     if op in ("before",) and d:
-        return Extraction.value_date < d
+        return FieldValue.value_date < d
     if op in ("after",) and d:
-        return Extraction.value_date > d
+        return FieldValue.value_date > d
     if op == "between" and d and value2 and _try_date(value2):
-        return and_(Extraction.value_date >= d, Extraction.value_date <= _try_date(value2))
+        return and_(FieldValue.value_date >= d, FieldValue.value_date <= _try_date(value2))
     if op in ("gt",) and n is not None:
-        return Extraction.value_number > n
+        return FieldValue.value_number > n
     if op in ("gte",) and n is not None:
-        return Extraction.value_number >= n
+        return FieldValue.value_number >= n
     if op in ("lt",) and n is not None:
-        return Extraction.value_number < n
+        return FieldValue.value_number < n
     if op in ("lte",) and n is not None:
-        return Extraction.value_number <= n
+        return FieldValue.value_number <= n
     if op == "eq" and n is not None:
-        return Extraction.value_number == n
+        return FieldValue.value_number == n
     if op == "contains":
-        return Extraction.value_text.ilike(f"%{value}%")
-    return Extraction.value_text.ilike(f"%{value}%")
+        return FieldValue.value_text.ilike(f"%{value}%")
+    return FieldValue.value_text.ilike(f"%{value}%")
 
 
 def _try_date(s: str) -> dt.date | None:

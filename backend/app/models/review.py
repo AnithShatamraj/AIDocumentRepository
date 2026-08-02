@@ -23,9 +23,9 @@ class ReviewItem(Base, TimestampMixin):
         PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
     )
     kind: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # extraction | classification
-    # Target row (extraction id or a classification context).
-    extraction_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("extractions.id", ondelete="CASCADE"), nullable=True
+    # Target row (field value id, or null for a classification review).
+    field_value_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("field_values.id", ondelete="CASCADE"), nullable=True
     )
 
     field_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)

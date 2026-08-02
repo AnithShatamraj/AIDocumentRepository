@@ -1,0 +1,30 @@
+ANITA SHARMA
+Email: anita.sharma@example.com | Phone: +91 98765 43210
+Bengaluru, India
+
+SUMMARY
+Senior software engineer with 11 years of professional experience building
+distributed systems and data platforms.
+
+WORK EXPERIENCE
+
+Principal Engineer, Northwind Data Systems
+March 2021 – Present
+Leads the streaming platform team. Responsible for architecture of the real-time
+ingestion pipeline, mentoring six engineers, and owning the on-call rotation.
+
+Senior Software Engineer, Globex Consulting LLC
+June 2017 – February 2021
+Built the customer analytics service handling 40M events per day. Responsible for
+service reliability, cost optimisation, and migrating the fleet to Kubernetes.
+
+Software Engineer, Acme Supplies Inc.
+August 2014 – May 2017
+Developed inventory management microservices. Responsible for the REST API layer
+and the nightly reconciliation jobs.
+
+SKILLS
+Python, Go, Kubernetes, PostgreSQL, Apache Kafka, Terraform
+
+EDUCATION
+B.E. Computer Science, Bengaluru Institute of Technology, 2014

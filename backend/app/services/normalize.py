@@ -15,6 +15,10 @@ _DATE_FORMATS = [
     "%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d-%m-%Y",
     "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y",
 ]
+# Month-precision dates are everywhere in real documents ("March 2021" employment
+# ranges, "Q1 2024" contract months). Parsed to the first of the month rather than
+# left unnormalized, which would otherwise dock confidence and force a review.
+_MONTH_FORMATS = ["%B %Y", "%b %Y", "%Y-%m", "%m/%Y", "%m-%Y"]
 
 
 class Normalized:
@@ -32,6 +36,11 @@ def _parse_date(raw: str) -> dt.date | None:
     for fmt in _DATE_FORMATS:
         try:
             return dt.datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    for fmt in _MONTH_FORMATS:  # month precision -> first of that month
+        try:
+            return dt.datetime.strptime(raw, fmt).date().replace(day=1)
         except ValueError:
             continue
     return None

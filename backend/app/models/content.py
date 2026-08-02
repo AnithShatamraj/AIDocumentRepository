@@ -1,4 +1,4 @@
-"""Derived content: chunks, embeddings, summaries, classifications, extractions.
+"""Derived content: chunks, embeddings, summaries, classifications, field values.
 
 Embeddings live in a dedicated table (not widening `chunks`) to avoid TOAST
 churn, per the pgvector implementation note in the spec.
@@ -9,7 +9,19 @@ import datetime as dt
 import uuid
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, Date, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    Time,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -96,8 +108,8 @@ class Classification(Base, TimestampMixin):
     document_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    category_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("categories.id", ondelete="SET NULL"), nullable=True
+    document_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("document_types.id", ondelete="SET NULL"), nullable=True
     )
     label: Mapped[str] = mapped_column(String(255), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
@@ -107,14 +119,31 @@ class Classification(Base, TimestampMixin):
     prompt_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
-class Extraction(Base, TimestampMixin):
-    """A single extracted metadata field value.
+class FieldValue(Base, TimestampMixin):
+    """One node of a document's extracted data tree.
 
-    Stored twice: `raw_value` (what the human verifies) and a normalized typed
-    value (what structured search queries).
+    Values form a tree so document types can define objects and lists (e.g.
+    `work_experience[2].organization`). Two addressing schemes are kept on
+    purpose:
+
+      * `parent_id` + `ordinal` — cheap recursive rendering and grouping, so all
+        of one list item's fields hang off a single container row;
+      * `field_path` — lets structured search stay a flat, indexed query
+        (`field_path LIKE 'parties[%].name'`) instead of a recursive CTE.
+
+    Leaves keep the typed columns, so each value is stored twice: `raw_value`
+    (what a human verifies) and a normalized typed value (what search queries).
+    Container rows (`node_kind` in object/list) hold no value themselves but
+    carry provenance for the block and let a reviewer accept a whole item.
     """
 
-    __tablename__ = "extractions"
+    __tablename__ = "field_values"
+    __table_args__ = (
+        UniqueConstraint("document_id", "document_version", "field_path",
+                         name="uq_field_value_path"),
+        Index("ix_field_values_key", "tenant_id", "field_key"),
+        Index("ix_field_values_path", "field_path"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -124,16 +153,30 @@ class Extraction(Base, TimestampMixin):
         PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
     )
     document_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    category_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("categories.id", ondelete="SET NULL"), nullable=True, index=True
+    document_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("document_types.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    field_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
+    # --- position in the tree ---
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("field_values.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    field_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    field_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    field_name: Mapped[str] = mapped_column(String(255), nullable=False)  # display label
+    node_kind: Mapped[str] = mapped_column(String(16), default="scalar", nullable=False)
+    ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # --- the value, stored twice (raw + normalized/typed) ---
+    data_type: Mapped[str] = mapped_column(String(16), default=VT_TEXT)
     raw_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     value_type: Mapped[str] = mapped_column(String(16), default=VT_TEXT)
     value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     value_number: Mapped[float | None] = mapped_column(Float, nullable=True)
     value_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    value_datetime: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    value_time: Mapped[dt.time | None] = mapped_column(Time, nullable=True)
+    value_boolean: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     value_currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
@@ -146,3 +189,9 @@ class Extraction(Base, TimestampMixin):
     model_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
     schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Found by the discovery pass rather than defined in the type's schema.
+    is_discovered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # No ORM self-relationship on purpose: the tree is assembled from a single
+    # flat SELECT (cheaper than lazy loads), and Postgres ON DELETE CASCADE on
+    # parent_id already removes descendants.

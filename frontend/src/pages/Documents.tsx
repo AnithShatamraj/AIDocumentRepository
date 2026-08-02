@@ -3,12 +3,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
+import { UploadDialog } from "../components/UploadDialog";
 
 export function Documents() {
   const qc = useQueryClient();
   const [q, setQ] = useState("");
   const [uploading, setUploading] = useState(false);
   const [msg, setMsg] = useState<string>("");
+  const [dialogOpen, setDialogOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const { data, isLoading } = useQuery({
@@ -56,13 +58,22 @@ export function Documents() {
             onChange={(e) => onUpload(e.target.files)}
             accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.png,.jpg,.jpeg,.tiff"
           />
-          <button disabled={uploading} onClick={() => fileRef.current?.click()}>
-            {uploading ? "Uploading…" : "Upload documents"}
+          <button onClick={() => setDialogOpen(true)}>Upload document</button>
+          <button className="secondary" disabled={uploading} onClick={() => fileRef.current?.click()}
+                  title="Upload several files at once with auto-detected types">
+            {uploading ? "Uploading…" : "Bulk upload"}
           </button>
         </div>
       </div>
 
       {msg && <div className="card" style={{ marginBottom: 16 }}>{msg}</div>}
+
+      {dialogOpen && (
+        <UploadDialog
+          onClose={() => setDialogOpen(false)}
+          onUploaded={() => qc.invalidateQueries({ queryKey: ["documents"] })}
+        />
+      )}
 
       <div className="toolbar">
         <input placeholder="Search by name…" value={q} onChange={(e) => setQ(e.target.value)} style={{ maxWidth: 320 }} />

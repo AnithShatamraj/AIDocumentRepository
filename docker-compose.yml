@@ -106,6 +106,8 @@ services:
     # Bind-mount source so uvicorn --reload picks up edits without a rebuild.
     volumes:
       - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+      - ./backend/alembic.ini:/app/alembic.ini
     ports:
       - "8000:8000"
     depends_on:
@@ -133,6 +135,8 @@ services:
       DOCLING_URL: http://docling:5001
     volumes:
       - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+      - ./backend/alembic.ini:/app/alembic.ini
     depends_on:
       api:
         condition: service_started

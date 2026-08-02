@@ -9,10 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.db import get_db
-from app.models.catalog import Category
+from app.models.catalog import DocumentType
 from app.models.constants import RV_AUTO_ACCEPTED
-from app.models.content import Extraction
-from app.models.document import Document, document_category
+from app.models.content import FieldValue
+from app.models.document import Document, document_type_links
 from app.models.ops import CostRecord
 from app.models.review import ReviewItem
 from app.models.tenant import User
@@ -37,13 +37,13 @@ async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = D
     )).all()
     by_status = {s: c for s, c in by_status_rows}
 
-    by_cat_rows = (await db.execute(
-        select(Category.name, func.count(document_category.c.document_id))
-        .join(document_category, document_category.c.category_id == Category.id)
-        .join(Document, Document.id == document_category.c.document_id)
-        .where(cond).group_by(Category.name)
+    by_type_rows = (await db.execute(
+        select(DocumentType.name, func.count(document_type_links.c.document_id))
+        .join(document_type_links, document_type_links.c.document_type_id == DocumentType.id)
+        .join(Document, Document.id == document_type_links.c.document_id)
+        .where(cond).group_by(DocumentType.name)
     )).all()
-    by_category = {name: c for name, c in by_cat_rows}
+    by_type = {name: c for name, c in by_type_rows}
 
     pending = (await db.execute(
         select(func.count()).select_from(ReviewItem)
@@ -67,13 +67,13 @@ async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = D
     for days in (7, 30):
         since = _now() - dt.timedelta(days=days)
         tot = (await db.execute(
-            select(func.count()).select_from(Extraction).where(Extraction.tenant_id == user.tenant_id,
-                                                               Extraction.created_at >= since)
+            select(func.count()).select_from(FieldValue).where(FieldValue.tenant_id == user.tenant_id,
+                                                               FieldValue.created_at >= since)
         )).scalar() or 0
         auto = (await db.execute(
-            select(func.count()).select_from(Extraction).where(
-                Extraction.tenant_id == user.tenant_id, Extraction.created_at >= since,
-                Extraction.review_status == RV_AUTO_ACCEPTED)
+            select(func.count()).select_from(FieldValue).where(
+                FieldValue.tenant_id == user.tenant_id, FieldValue.created_at >= since,
+                FieldValue.review_status == RV_AUTO_ACCEPTED)
         )).scalar() or 0
         autoaccept[f"{days}d"] = round(auto / tot, 3) if tot else None
 
@@ -85,7 +85,7 @@ async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = D
 
     return {
         "total_documents": total,
-        "documents_by_category": by_category,
+        "documents_by_type": by_type,
         "processing_status": by_status,
         "pending_reviews": {"count": pending, "oldest_age_hours": oldest_age_hours},
         "recent_uploads": recent,

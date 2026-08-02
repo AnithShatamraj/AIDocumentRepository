@@ -52,8 +52,8 @@ class GroupCreate(BaseModel):
     member_ids: list[uuid.UUID] = []
 
 
-# ------------------------------------------------------------------- categories
-class CategoryOut(BaseModel):
+# ------------------------------------------------------------------- document types
+class DocumentTypeOut(BaseModel):
     id: uuid.UUID
     name: str
     description: str
@@ -64,13 +64,13 @@ class CategoryOut(BaseModel):
         from_attributes = True
 
 
-class CategoryCreate(BaseModel):
+class DocumentTypeCreate(BaseModel):
     name: str
     description: str = ""
     fields: list[dict] | None = None  # optional extraction schema fields
 
 
-class CategoryUpdate(BaseModel):
+class DocumentTypeUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     is_enabled: bool | None = None
@@ -96,9 +96,10 @@ class DocumentOut(BaseModel):
 
 
 class DocumentDetail(DocumentOut):
-    categories: list[CategoryOut] = []
+    document_types: list[DocumentTypeOut] = []
     summary: dict | None = None
-    extractions: list[dict] = []
+    fields: list[dict] = []
+    extractions: list[dict] = []  # deprecated flat alias
     classifications: list[dict] = []
 
 
@@ -147,7 +148,7 @@ class StructuredSearchRequest(BaseModel):
     op: str = "eq"
     value: str | None = None
     value2: str | None = None
-    category_id: uuid.UUID | None = None
+    document_type_id: uuid.UUID | None = None
     verified_only: bool = False
     limit: int = 100
 
@@ -176,7 +177,7 @@ class ReviewOut(BaseModel):
 class ReviewResolve(BaseModel):
     action: str  # accept | modify | reject
     corrected_value: str | None = None
-    category_ids: list[uuid.UUID] | None = None  # for classification review
+    document_type_ids: list[uuid.UUID] | None = None  # for classification review
     notes: str | None = None
 
 

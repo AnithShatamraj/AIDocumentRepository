@@ -8,7 +8,7 @@ import { DocumentDetail } from "./pages/DocumentDetail";
 import { Search } from "./pages/Search";
 import { Research } from "./pages/Research";
 import { Review } from "./pages/Review";
-import { Categories } from "./pages/Categories";
+import { DocumentTypes } from "./pages/DocumentTypes";
 import { Admin } from "./pages/Admin";
 
 export function App() {
@@ -33,7 +33,7 @@ export function App() {
         <Route path="/search" element={<Search />} />
         <Route path="/research" element={<Research />} />
         <Route path="/review" element={<Review />} />
-        <Route path="/categories" element={<Categories />} />
+        <Route path="/document-types" element={<DocumentTypes />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />

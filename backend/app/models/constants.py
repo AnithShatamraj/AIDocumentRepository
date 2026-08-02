@@ -68,6 +68,7 @@ VT_CURRENCY = "currency"
 NOTIFY_PROCESSING_DONE = "processing_complete"
 NOTIFY_PROCESSING_FAILED = "processing_failed"
 NOTIFY_REVIEW_PENDING = "review_pending"
+NOTIFY_DUPLICATE_UPLOAD = "duplicate_upload"
 
 # --- Audit event types ---
 AUDIT_UPLOAD = "document.upload"

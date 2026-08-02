@@ -9,7 +9,7 @@ const links = [
   { to: "/search", label: "Search" },
   { to: "/research", label: "Research Assistant" },
   { to: "/review", label: "Review Queue" },
-  { to: "/categories", label: "Categories" },
+  { to: "/document-types", label: "Document Types" },
   { to: "/admin", label: "Administration" },
 ];
 

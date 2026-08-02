@@ -5,6 +5,7 @@ import { api, API_BASE, tokenStore } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
 import { CollapsibleSection } from "../components/CollapsibleSection";
 import { PdfViewer, Highlight } from "../components/PdfViewer";
+import { FieldTree, FieldNode } from "../components/FieldTree";
 
 const STAGE_LABEL: Record<string, string> = {
   text_extraction: "Text Extraction",
@@ -143,9 +144,12 @@ export function DocumentDetail() {
   const extraction = pipeline?.stages?.find((s: any) => s.name === "text_extraction");
   const ocrUsed = extraction?.output?.ocr_used;
   const parser = extraction?.output?.parser;
-  const pendingCount = (doc.extractions || []).filter(
-    (e: any) => e.review_status === "pending_review"
-  ).length;
+  const countPending = (nodes: any[]): number =>
+    (nodes || []).reduce(
+      (n, x) => n + (x.review_status === "pending_review" && x.node_kind === "scalar" ? 1 : 0) + countPending(x.children),
+      0
+    );
+  const pendingCount = countPending(doc.fields || []);
 
   return (
     <div className="doc-page">
@@ -157,7 +161,7 @@ export function DocumentDetail() {
             <span>{doc.file_type?.toUpperCase()} · v{doc.current_version}</span>
             {parser && <span className="pill">{parser}</span>}
             {ocrUsed && <span className="pill">OCR</span>}
-            {doc.categories?.map((c: any) => <span key={c.id} className="pill">{c.name}</span>)}
+            {doc.document_types?.map((c: any) => <span key={c.id} className="pill">{c.name}</span>)}
           </div>
         </div>
         <div className="row">
@@ -211,63 +215,20 @@ export function DocumentDetail() {
           </CollapsibleSection>
 
           <CollapsibleSection
-            title="Extracted Metadata"
+            title="Extracted Data"
             badge={pendingCount > 0 ? <span className="pill">{pendingCount} pending</span> : undefined}
           >
-            {(doc.extractions || []).length === 0 && <div className="muted">No fields extracted yet.</div>}
-            {(doc.extractions || []).map((e: any) => {
-              const clickable = isPdf && (e.source_bbox?.page || e.source_page);
-              return (
-                <div
-                  key={e.id}
-                  className={`stack${clickable ? " meta-field" : ""}`}
-                  style={{ padding: "8px 6px", borderBottom: "1px solid var(--border)" }}
-                  onClick={() => clickable && jumpToField(e)}
-                  title={clickable ? "Click to highlight source in the document" : undefined}
-                >
-                  <div className="spread">
-                    <strong style={{ fontSize: 13 }}>{e.field_name}</strong>
-                    <ReviewStatus status={e.review_status} />
-                  </div>
-                  <div className="spread">
-                    <span>{e.raw_value || <span className="muted">—</span>}</span>
-                    <span className="muted conf">{Math.round((e.confidence || 0) * 100)}%</span>
-                  </div>
-                  <div className="spread" style={{ alignItems: "center" }}>
-                    {clickable ? (
-                      <span className="muted" style={{ fontSize: 12 }}>
-                        p.{e.source_bbox?.page || e.source_page}
-                        {e.source_bbox?.rects?.length ? " · region located" : ""}
-                      </span>
-                    ) : (
-                      <span />
-                    )}
-                    {e.review_status === "pending_review" ? (
-                      <span className="row" style={{ gap: 6 }} onClick={(ev) => ev.stopPropagation()}>
-                        <button
-                          className="ghost approve"
-                          disabled={!!reviewing[e.id]}
-                          title="Accept this value"
-                          onClick={() => reviewField(e.id, "accept")}
-                        >
-                          ✓ Accept
-                        </button>
-                        <button
-                          className="ghost reject"
-                          disabled={!!reviewing[e.id]}
-                          title="Reject this value"
-                          onClick={() => reviewField(e.id, "reject")}
-                        >
-                          ✕ Reject
-                        </button>
-                      </span>
-                    ) : (
-                      <span />
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {(doc.fields || []).length === 0 ? (
+              <div className="muted">No fields extracted yet.</div>
+            ) : (
+              <FieldTree
+                nodes={doc.fields}
+                isPdf={isPdf}
+                reviewing={reviewing}
+                onJump={jumpToField}
+                onReview={reviewField}
+              />
+            )}
           </CollapsibleSection>
 
           <CollapsibleSection title="Classifications" defaultOpen={false}>

@@ -56,7 +56,22 @@ async def scenario():
         db.add(Embedding(tenant_id=t.id, chunk_id=chunk.id, document_id=doc.id, vector=vec,
                          embedding_model="stub", embedding_dim=len(vec)))
         await db.commit()
-        yield {"tenant": t, "owner": owner, "other": other, "doc": doc}
+        tenant_id, doc_id = t.id, doc.id
+        try:
+            yield {"tenant": t, "owner": owner, "other": other, "doc": doc}
+        finally:
+            # Without this, each run leaks a tenant/user/document/chunk/embedding
+            # into the database the tests point at. Documents go first:
+            # documents.owner_id is ON DELETE RESTRICT, so dropping the tenant
+            # (which cascades to users) is blocked while a document survives.
+            # Core DELETEs, not session.delete(): the ORM would try to NULL the
+            # children's tenant_id instead of letting Postgres ON DELETE CASCADE run.
+            from sqlalchemy import delete as sql_delete
+
+            async with AsyncSessionLocal() as cleanup:
+                await cleanup.execute(sql_delete(Document).where(Document.id == doc_id))
+                await cleanup.execute(sql_delete(Tenant).where(Tenant.id == tenant_id))
+                await cleanup.commit()
 
 
 async def test_owner_can_retrieve(scenario):
