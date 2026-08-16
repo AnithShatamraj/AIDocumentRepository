@@ -139,13 +139,26 @@ def _run_stage(task, run_id: str, name: str, work):
             _publish(run, name, ST_SUCCEEDED, {"output": output})
         except Exception as e:  # noqa: BLE001
             db.rollback()
-            stage = _get_stage(db, run.id, name)
-            stage.status = ST_FAILED
-            stage.error_class = type(e).__name__
-            stage.error_message = str(e)[:2000]
-            stage.traceback_ref = traceback.format_exc()[-1500:]
-            stage.finished_at = _now()
-            db.commit()
+            try:
+                stage = _get_stage(db, run.id, name)
+                stage.status = ST_FAILED
+                stage.error_class = type(e).__name__
+                stage.error_message = str(e)[:2000]
+                stage.traceback_ref = traceback.format_exc()[-4000:]
+                stage.finished_at = _now()
+                db.commit()
+            except Exception:
+                # Recording the failure must never itself leave the stage
+                # wedged at 'running' forever — fall back to the bare minimum
+                # status flip if the rich error details can't be persisted
+                # (e.g. an unexpected column-size or serialization issue).
+                db.rollback()
+                log.error("stage_failure_bookkeeping_failed", stage=name, run_id=run_id,
+                          exc_info=True)
+                stage = _get_stage(db, run.id, name)
+                stage.status = ST_FAILED
+                stage.finished_at = _now()
+                db.commit()
             _publish(run, name, ST_FAILED, {"error": str(e)})
             log.error("stage_failed", stage=name, run_id=run_id, error=str(e))
 
@@ -492,7 +505,7 @@ def _extract_for_type(db, run, stage, doc_type, schema, text, layout_units) -> t
 
         row = FieldValue(
             id=uuid.uuid5(uuid.NAMESPACE_URL,
-                          f"{run.document_id}:{run.document_version}:{node.field_path}"),
+                          f"{run.document_id}:{run.document_version}:{doc_type.id}:{node.field_path}"),
             tenant_id=run.tenant_id, document_id=run.document_id,
             document_version=run.document_version, document_type_id=doc_type.id,
             parent_id=parent_id, field_key=node.field_key, field_path=node.field_path,
@@ -532,17 +545,36 @@ def _extract_for_type(db, run, stage, doc_type, schema, text, layout_units) -> t
 
     # --- discovery pass: salient facts the schema doesn't cover ("Entities") ---
     try:
-        known = [d.name for d in defs]
+        # Ground the model with every fact ALREADY extracted — label and real
+        # value, including nested/list ones (e.g. "Tenants #2 PAN: ..."), not
+        # just top-level field names. Without the actual values, the model has
+        # no way to recognize a differently-worded restatement of a fact it
+        # already found (e.g. "Refundable Deposit Amount" vs "Security
+        # Deposit"), and duplicates it under a new name instead of skipping it.
+        known = [
+            (n.name, n.raw_value) for n in fieldsvc.iter_flat(tree)
+            if n.node_kind == "scalar" and n.raw_value
+        ][:60]
         entities, disc_usage = discover_entities(text, known, doc_type.name)
         _record_cost(db, run, STAGE_METADATA, disc_usage)
+        seen_keys: set[str] = set()
         for i, ent in enumerate(entities):
             key = fieldsvc.slugify_key(ent["name"])
+            # Two distinct entity names can still slugify to the same key
+            # (or, on rare model repetition, discover_entities' own dedupe
+            # can be bypassed) -- field_path/id are derived from `key`, so a
+            # repeat here would otherwise hit the FieldValue primary key
+            # constraint on commit and fail the whole stage. Skip rather
+            # than crash: the first occurrence wins.
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             path = f"_discovered.{key}"
             loc = bbox_locator.locate_any(layout_units, [ent.get("quote"), ent["value"]], None)
             norm = normalize.normalize(ent["value"], VT_TEXT)
             db.add(FieldValue(
                 id=uuid.uuid5(uuid.NAMESPACE_URL,
-                              f"{run.document_id}:{run.document_version}:{path}"),
+                              f"{run.document_id}:{run.document_version}:{doc_type.id}:{path}"),
                 tenant_id=run.tenant_id, document_id=run.document_id,
                 document_version=run.document_version, document_type_id=doc_type.id,
                 field_key=key, field_path=path, field_name=ent["name"], node_kind="scalar",

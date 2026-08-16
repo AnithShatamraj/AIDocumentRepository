@@ -60,7 +60,7 @@ class PipelineStage(Base, TimestampMixin):
     # Error tracking (Section 5).
     error_class: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    traceback_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    traceback_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
     retries: Mapped[int] = mapped_column(Integer, default=0)
