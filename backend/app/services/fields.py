@@ -297,6 +297,48 @@ def iter_flat(values: list[FlatValue]):
             yield from iter_flat(v.children)
 
 
+@dataclass
+class LeafPath:
+    """One scalar leaf of a document type's schema, flattened for search.
+
+    `path_pattern` mirrors the `field_path` stored on `field_values`, except
+    list positions are written as a literal `[]` — "any index" — rather than a
+    concrete `[0]`, `[1]`, ... Structured search turns that into a SQL LIKE
+    pattern (`work_experience[%].organization`) so one field definition finds
+    every occurrence across every list item, in every document.
+    """
+
+    field_key: str
+    path_pattern: str
+    label: str
+    data_type: str
+    repeats: bool  # true if this leaf can occur more than once per document
+
+
+def list_leaf_paths(
+    defs: list[FieldDef], _path: str = "", _label: str = "", _repeats: bool = False
+) -> list[LeafPath]:
+    """Flatten a field-definition tree into searchable leaf paths."""
+    out: list[LeafPath] = []
+    for d in defs:
+        path = f"{_path}.{d.key}" if _path else d.key
+        label = f"{_label} → {d.name}" if _label else d.name
+        if d.data_type == "object":
+            out.extend(list_leaf_paths(d.fields, path, label, _repeats))
+        elif d.data_type == "list":
+            item = d.item
+            item_path = f"{path}[]"
+            if item.data_type == "object":
+                out.extend(list_leaf_paths(item.fields, item_path, label, True))
+            else:
+                out.append(LeafPath(field_key=item.key, path_pattern=item_path,
+                                    label=label, data_type=item.data_type, repeats=True))
+        else:
+            out.append(LeafPath(field_key=d.key, path_pattern=path, label=label,
+                                data_type=d.data_type, repeats=_repeats))
+    return out
+
+
 def describe_for_prompt(defs: list[FieldDef], indent: int = 0) -> str:
     """Human-readable outline of the schema for the prompt/agent instructions."""
     lines = []
