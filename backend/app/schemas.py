@@ -144,7 +144,9 @@ class SearchHit(BaseModel):
 
 
 class StructuredSearchRequest(BaseModel):
-    field_name: str | None = None
+    field_key: str | None = None  # matches every occurrence, any nesting/list position
+    field_path: str | None = None  # explicit path; use [] for "any list index"
+    field_name: str | None = None  # deprecated: pre-nesting alias for field_key
     op: str = "eq"
     value: str | None = None
     value2: str | None = None

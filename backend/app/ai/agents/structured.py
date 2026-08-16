@@ -10,6 +10,8 @@ rows. Falls back to plain JSON mode if the provider rejects the schema.
 from __future__ import annotations
 
 import json
+import re
+from difflib import SequenceMatcher
 
 from app.ai import prompts
 from app.ai.types import LLMResult, Message
@@ -87,36 +89,132 @@ def extract_structured(
     return payload, result
 
 
-DISCOVER_SYSTEM = """You are reviewing a {type_name} document that has already had these
-fields extracted: {known}.
+DISCOVER_SYSTEM = """You are reviewing a {type_name} document. These fields have already
+been extracted for it (label: value):
 
-Find up to {limit} ADDITIONAL facts that a reader of this document type would care about
-and that are NOT already covered above. Return STRICT JSON:
+{known_block}
+
+Find up to {limit} ADDITIONAL facts that a reader of this document type would genuinely
+want and that are NOT already covered above.
+
+Do not report a fact that restates, decomposes into installments/tiers, or is a synonym
+for any field already extracted above — even under a different name, in different
+wording, or as a component of it. For example:
+  - if "Security Deposit" is already extracted, do not also report a "Refundable
+    Deposit Amount" or "Advance Paid" for the same sum — it is the same fact;
+  - if "Monthly Rent" is already extracted, do not also report a "License Fee for the
+    First N Months" / "Rent for Months X-Y" or any other time-sliced breakdown of that
+    same recurring payment — a schedule or tiering of an existing field is not a new fact.
+
+Return STRICT JSON:
 {{"entities": [{{"name": "<short label>", "value": "<verbatim value>",
                "confidence": <0..1>, "quote": "<exact supporting snippet>"}}]}}
 Only include facts actually stated in the document. Return an empty list if there is nothing worth adding."""
 
+# Words too generic to count as a meaningful signal of overlap on their own —
+# stripping them keeps the token-overlap check from firing on every field pair
+# that happens to share a word like "amount" or "fee".
+_DUP_STOPWORDS = frozenset(
+    "the a an of for and or to in on at is are amount amounts fee fees period "
+    "periods total value number paid payable monthly first next last initial "
+    "date months month year years".split()
+)
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
-def discover_entities(text: str, known_names: list[str], type_name: str, limit: int = 8):
-    """Second pass: salient facts outside the schema ('Entities')."""
+
+def _label_tokens(label: str) -> set[str]:
+    return {t for t in _TOKEN_RE.findall(label.lower()) if t not in _DUP_STOPWORDS and len(t) > 1}
+
+
+def _label_similarity(a: str, b: str) -> float:
+    """Token-overlap plus character-ratio similarity, ignoring generic filler
+    words — lets "Refundable Deposit Amount" read as close to "Security Deposit"
+    (shared meaningful token "deposit") without over-matching on words like
+    "amount" that appear in almost every extracted field label.
+
+    Both signals are computed on the stopword-filtered tokens, not the raw
+    strings: two unrelated fields that both happen to end in "Amount" (Total
+    Amount / Tax Amount) share a lot of raw characters, so a plain character
+    ratio would rate them "similar" for the wrong reason.
+    """
+    ta, tb = _label_tokens(a), _label_tokens(b)
+    if not ta and not tb:
+        # Both labels are made entirely of filler words — nothing meaningful
+        # to tokenize, so fall back to a raw character comparison.
+        return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    if not ta or not tb:
+        return 0.0
+    overlap = len(ta & tb) / min(len(ta), len(tb))
+    ratio = SequenceMatcher(None, " ".join(sorted(ta)), " ".join(sorted(tb))).ratio()
+    return max(overlap, ratio)
+
+
+def _values_match(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return False
+    na = re.sub(r"[^a-z0-9]", "", a.lower())
+    nb = re.sub(r"[^a-z0-9]", "", b.lower())
+    return bool(na) and bool(nb) and (na == nb or na in nb or nb in na)
+
+
+def _is_duplicate_of_known(name: str, value: str, known: list[tuple[str, str]],
+                          label_threshold: float = 0.5) -> bool:
+    """Deterministic backstop for the prompt instruction above: drop a
+    discovered 'entity' that restates an already-extracted field even if the
+    model's instructions didn't catch it. This only catches near-miss
+    phrasing or matching values (e.g. a renamed deposit) — a same-concept
+    different-vocabulary case that shares no words or value with any schema
+    field (e.g. "License Fee" vs "Rent") can only be caught by the model
+    itself, which is why the prompt above is grounded with the real extracted
+    values rather than bare field names.
+    """
+    for kname, kvalue in known:
+        if _label_similarity(name, kname) >= label_threshold or _values_match(value, kvalue):
+            return True
+    return False
+
+
+def discover_entities(text: str, known: list[tuple[str, str]], type_name: str, limit: int = 8):
+    """Second pass: salient facts outside the schema ('Entities').
+
+    `known` is every (label, extracted value) pair already found for this
+    document. Grounding the model with real values — not just field names —
+    is what lets it recognize a differently-worded restatement of a fact it
+    already extracted; the `_is_duplicate_of_known` check below is a
+    deterministic backstop for when it doesn't.
+    """
     from app.ai.registry import get_llm
 
     llm = get_llm()
+    # Full values feed the dedupe check below; the prompt only needs a preview
+    # of each so a handful of long free-text fields don't blow up the token cost.
+    known_block = "\n".join(f"  - {n}: {v[:100]}" for n, v in known) or "  (none)"
     msgs = [
         Message("system", DISCOVER_SYSTEM.format(
-            type_name=type_name, known=", ".join(known_names) or "none", limit=limit)),
+            type_name=type_name, known_block=known_block, limit=limit)),
         Message("user", f"Document text:\n\n{text[:_TEXT_LIMIT]}"),
     ]
     data, res = llm.complete_json(msgs, model=settings.llm_extract_model)
     items = []
-    for e in (data.get("entities") or [])[:limit]:
+    # Grows with every accepted item so a later entity in the SAME response
+    # that restates/repeats an earlier one (the model returning "Tenant
+    # Occupation" twice, say) is caught too — `known` alone only guards
+    # against the schema's own fields, not the model repeating itself.
+    seen = list(known)
+    for e in (data.get("entities") or [])[: limit * 2]:  # slack before our own filter
         name = (e.get("name") or "").strip()
         value = e.get("value")
         if not name or value in (None, ""):
             continue
+        value = str(value)
+        if _is_duplicate_of_known(name, value, seen):
+            continue
         items.append({
-            "name": name[:120], "value": str(value),
+            "name": name[:120], "value": value,
             "confidence": float(e.get("confidence") or 0.0),
             "quote": e.get("quote"),
         })
+        seen.append((name, value))
+        if len(items) >= limit:
+            break
     return items, res

@@ -139,7 +139,14 @@ class FieldValue(Base, TimestampMixin):
 
     __tablename__ = "field_values"
     __table_args__ = (
-        UniqueConstraint("document_id", "document_version", "field_path",
+        # A document can carry more than one Document Type at once (e.g. a
+        # rent agreement tagged both "ResidentialRentAgreement-India" and the
+        # generic "Contracts"); each type's extraction -- schema fields and
+        # its own discovery pass -- runs independently over the same text and
+        # must not collide just because both happen to produce the same
+        # field_path (a shared schema field name, or two discovery passes
+        # both surfacing e.g. "_discovered.corporate_title").
+        UniqueConstraint("document_id", "document_version", "document_type_id", "field_path",
                          name="uq_field_value_path"),
         Index("ix_field_values_key", "tenant_id", "field_key"),
         Index("ix_field_values_path", "field_path"),
