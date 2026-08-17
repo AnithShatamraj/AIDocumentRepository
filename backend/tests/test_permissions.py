@@ -19,7 +19,7 @@ from app.core.security import hash_password
 from app.models.constants import PERM_READ, ROLE_VIEWER
 from app.models.content import Chunk, Embedding
 from app.models.document import Document, DocumentPermission
-from app.models.tenant import Tenant, User
+from app.models.tenant import User
 from app.services import search
 
 pytestmark = pytest.mark.asyncio
@@ -35,17 +35,18 @@ async def _mk_user(db, tenant_id, email, role=ROLE_VIEWER):
 @pytest.fixture
 async def scenario():
     async with AsyncSessionLocal() as db:
-        t = Tenant(name="T", slug=f"t-{uuid.uuid4().hex[:8]}")
-        db.add(t)
-        await db.flush()
-        owner = await _mk_user(db, t.id, f"owner-{uuid.uuid4().hex[:6]}@t.test")
-        other = await _mk_user(db, t.id, f"other-{uuid.uuid4().hex[:6]}@t.test")
+        # tenant_id is a plain UUID now (no local Tenant row/FK -- a tenant's
+        # identity is its own physical database in the real app; this test
+        # DB just needs a schema-valid value to scope rows by).
+        tenant_id = uuid.uuid4()
+        owner = await _mk_user(db, tenant_id, f"owner-{uuid.uuid4().hex[:6]}@t.test")
+        other = await _mk_user(db, tenant_id, f"other-{uuid.uuid4().hex[:6]}@t.test")
 
-        doc = Document(tenant_id=t.id, owner_id=owner.id, name="secret.txt", file_type="txt",
+        doc = Document(tenant_id=tenant_id, owner_id=owner.id, name="secret.txt", file_type="txt",
                        current_version=1, processing_status="processed")
         db.add(doc)
         await db.flush()
-        chunk = Chunk(id=uuid.uuid4(), tenant_id=t.id, document_id=doc.id, document_version=1,
+        chunk = Chunk(id=uuid.uuid4(), tenant_id=tenant_id, document_id=doc.id, document_version=1,
                       ordinal=0, content="the eagle lands at midnight")
         db.add(chunk)
         await db.flush()
@@ -53,24 +54,24 @@ async def scenario():
         from app.ai.registry import get_embedder
         from app.core.config import settings
         vec = get_embedder().embed([chunk.content], model=settings.embedding_model).vectors[0]
-        db.add(Embedding(tenant_id=t.id, chunk_id=chunk.id, document_id=doc.id, vector=vec,
+        db.add(Embedding(tenant_id=tenant_id, chunk_id=chunk.id, document_id=doc.id, vector=vec,
                          embedding_model="stub", embedding_dim=len(vec)))
         await db.commit()
-        tenant_id, doc_id = t.id, doc.id
+        doc_id = doc.id
         try:
-            yield {"tenant": t, "owner": owner, "other": other, "doc": doc}
+            yield {"tenant_id": tenant_id, "owner": owner, "other": other, "doc": doc}
         finally:
-            # Without this, each run leaks a tenant/user/document/chunk/embedding
+            # Without this, each run leaks a user/document/chunk/embedding
             # into the database the tests point at. Documents go first:
-            # documents.owner_id is ON DELETE RESTRICT, so dropping the tenant
-            # (which cascades to users) is blocked while a document survives.
-            # Core DELETEs, not session.delete(): the ORM would try to NULL the
-            # children's tenant_id instead of letting Postgres ON DELETE CASCADE run.
+            # documents.owner_id is ON DELETE RESTRICT. Core DELETEs, not
+            # session.delete(): the ORM would try to NULL the children's
+            # foreign keys instead of letting Postgres ON DELETE CASCADE run
+            # (document_id/user_id FKs on chunk/embedding/user rows).
             from sqlalchemy import delete as sql_delete
 
             async with AsyncSessionLocal() as cleanup:
                 await cleanup.execute(sql_delete(Document).where(Document.id == doc_id))
-                await cleanup.execute(sql_delete(Tenant).where(Tenant.id == tenant_id))
+                await cleanup.execute(sql_delete(User).where(User.tenant_id == tenant_id))
                 await cleanup.commit()
 
 

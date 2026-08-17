@@ -1,9 +1,13 @@
-# Run once per release to ensure the pgvector extension, tables, and indexes.
-# In production, replace `init-db` with an Alembic `upgrade head` step.
+# Run once per release: bring the management database schema and every
+# already-provisioned tenant's database up to the current migration head.
+# Deliberately does NOT provision new tenants -- that's a separate, explicitly
+# gated operation (`python -m app.cli provision-tenant <slug> <name>`, e.g.
+# via `kubectl exec`), not something to run unattended on every release the
+# way `seed` did in single-tenant dev bootstrap.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: aidocs-init-db
+  name: aidocs-migrate
   namespace: aidocs
 spec:
   backoffLimit: 3
@@ -11,9 +15,9 @@ spec:
     spec:
       restartPolicy: Never
       containers:
-        - name: init-db
+        - name: migrate
           image: aidocs-backend:latest
-          command: ["sh", "-c", "python -m app.cli init-db && python -m app.cli seed"]
+          command: ["sh", "-c", "python -m app.cli create-mgmt-db && python -m app.cli migrate-mgmt && python -m app.cli migrate-all-tenants"]
           envFrom:
             - configMapRef:
                 name: aidocs-config

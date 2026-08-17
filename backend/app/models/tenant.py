@@ -1,4 +1,12 @@
-"""Tenant, User, Group models."""
+"""User, Group models.
+
+The `Tenant` model itself lives in `models/mgmt.py` (management database
+only) -- each tenant's own database no longer has a local `tenants` table,
+so `tenant_id` here is a plain UUID column, not a foreign key. A tenant's
+identity is enforced by which physical database you're connected to (see
+`core/tenant_db.py`), not by a same-database FK; `tenant_id` is kept purely
+as defense-in-depth for the app-level filters that already existed.
+"""
 from __future__ import annotations
 
 import uuid
@@ -20,33 +28,18 @@ user_group = Table(
 )
 
 
-class Tenant(Base, TimestampMixin):
-    __tablename__ = "tenants"
-
-    id: Mapped[uuid.UUID] = uuid_pk()
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
-    users: Mapped[list["User"]] = relationship(back_populates="tenant")
-    groups: Mapped[list["Group"]] = relationship(back_populates="tenant")
-
-
 class User(Base, TimestampMixin):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("tenant_id", "email", name="uq_user_tenant_email"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
     full_name: Mapped[str] = mapped_column(String(255), default="")
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(32), default=ROLE_VIEWER, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    tenant: Mapped["Tenant"] = relationship(back_populates="users")
     groups: Mapped[list["Group"]] = relationship(secondary=user_group, back_populates="members")
 
 
@@ -55,11 +48,8 @@ class Group(Base, TimestampMixin):
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_group_tenant_name"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1024), default="")
 
-    tenant: Mapped["Tenant"] = relationship(back_populates="groups")
     members: Mapped[list["User"]] = relationship(secondary=user_group, back_populates="groups")

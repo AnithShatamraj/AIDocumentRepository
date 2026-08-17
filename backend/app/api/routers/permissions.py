@@ -5,8 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import client_ip, get_current_user
-from app.core.db import get_db
+from app.api.deps import client_ip, get_current_user, get_tenant_db
 from app.models.constants import AUDIT_PERM_CHANGE, PERM_LEVELS, PERM_MANAGE
 from app.models.document import Document, DocumentPermission
 from app.models.tenant import User
@@ -27,7 +26,7 @@ async def _require_manage(db, user, document_id) -> Document:
 
 
 @router.get("", response_model=list[PermissionOut])
-async def list_permissions(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_permissions(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     await _require_manage(db, user, document_id)
     rows = (await db.execute(
         select(DocumentPermission).where(DocumentPermission.document_id == document_id)
@@ -37,7 +36,7 @@ async def list_permissions(document_id: str, user: User = Depends(get_current_us
 
 @router.post("", response_model=PermissionOut, status_code=201)
 async def grant(document_id: str, body: PermissionGrant, request: Request,
-                user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await _require_manage(db, user, document_id)
     if body.level not in PERM_LEVELS:
         raise HTTPException(400, f"level must be one of {PERM_LEVELS}")
@@ -70,7 +69,7 @@ async def grant(document_id: str, body: PermissionGrant, request: Request,
 
 @router.delete("/{permission_id}", status_code=204)
 async def revoke(document_id: str, permission_id: str, request: Request,
-                 user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                 user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await _require_manage(db, user, document_id)
     perm = await db.get(DocumentPermission, permission_id)
     if not perm or perm.document_id != doc.id:

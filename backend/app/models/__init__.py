@@ -1,6 +1,6 @@
 """Import all models so SQLAlchemy metadata is fully populated."""
 from app.models.base import TimestampMixin, uuid_pk  # noqa: F401
-from app.models.tenant import Group, Tenant, User, user_group  # noqa: F401
+from app.models.tenant import Group, User, user_group  # noqa: F401
 from app.models.catalog import DocumentType, TypeSchema  # noqa: F401
 from app.models.document import (  # noqa: F401
     Document,
@@ -28,7 +28,6 @@ from app.models.ops import (  # noqa: F401
 )
 
 __all__ = [
-    "Tenant",
     "User",
     "Group",
     "user_group",

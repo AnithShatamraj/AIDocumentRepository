@@ -5,6 +5,7 @@ import { useAuth } from "../auth/AuthContext";
 export function Login() {
   const { login } = useAuth();
   const nav = useNavigate();
+  const [tenantSlug, setTenantSlug] = useState("acme-corp");
   const [email, setEmail] = useState("admin@acme.com");
   const [password, setPassword] = useState("admin12345");
   const [error, setError] = useState("");
@@ -15,7 +16,7 @@ export function Login() {
     setError("");
     setBusy(true);
     try {
-      await login(email, password);
+      await login(tenantSlug, email, password);
       nav("/");
     } catch (err: any) {
       setError(err.message || "Login failed");
@@ -31,6 +32,10 @@ export function Login() {
           AI<span>Docs</span> Repository
         </div>
         <div className="field">
+          <label>Workspace</label>
+          <input value={tenantSlug} onChange={(e) => setTenantSlug(e.target.value)} required />
+        </div>
+        <div className="field">
           <label>Email</label>
           <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
         </div>
@@ -43,7 +48,7 @@ export function Login() {
           {busy ? "Signing in…" : "Sign in"}
         </button>
         <div className="muted" style={{ marginTop: 12, fontSize: 12 }}>
-          Seeded admin: admin@acme.com / admin12345
+          Seeded admin: workspace acme-corp · admin@acme.com / admin12345
         </div>
       </form>
     </div>

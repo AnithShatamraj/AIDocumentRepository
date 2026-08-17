@@ -24,12 +24,13 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 def create_access_token(
-    *, user_id: uuid.UUID | str, tenant_id: uuid.UUID | str, role: str
+    *, user_id: uuid.UUID | str, tenant_id: uuid.UUID | str, tenant_slug: str, role: str
 ) -> str:
     now = dt.datetime.now(dt.timezone.utc)
     payload = {
         "sub": str(user_id),
         "tenant_id": str(tenant_id),
+        "tenant_slug": tenant_slug,
         "role": role,
         "iat": now,
         "exp": now + dt.timedelta(minutes=settings.access_token_expire_minutes),

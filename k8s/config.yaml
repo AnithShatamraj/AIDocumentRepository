@@ -9,13 +9,19 @@ data:
   ENVIRONMENT: "production"
   LOG_LEVEL: "INFO"
   API_CORS_ORIGINS: "https://docs.example.com"
+  # Shared Postgres server hosting every tenant's own database (database-per-
+  # tenant, not server-per-tenant) plus the management database below.
   POSTGRES_HOST: "aidocs-pg.postgres.database.azure.com"
   POSTGRES_PORT: "5432"
-  POSTGRES_DB: "aidocs"
+  # The tenant registry only -- connection info, storage location, platform
+  # config. No tenant data lives here. See app/models/mgmt.py.
+  MGMT_POSTGRES_DB: "aidocs_mgmt"
   REDIS_HOST: "aidocs-redis.redis.cache.windows.net"
   REDIS_PORT: "6380"
+  # One shared Storage Account; each tenant gets its own container within it
+  # (see app/cli.py::provision_tenant) -- the container name is resolved
+  # per-tenant from the management database, not set globally here.
   STORAGE_PROVIDER: "azure"
-  STORAGE_BUCKET: "aidocs"
   AZURE_STORAGE_ACCOUNT_URL: "https://aidocsblob.blob.core.windows.net"
   AI_DEFAULT_PROVIDER: "openai"
   EMBEDDING_PROVIDER: "openai"
@@ -32,7 +38,18 @@ metadata:
 type: Opaque
 stringData:
   SECRET_KEY: "REPLACE_WITH_LONG_RANDOM"
+  # Platform-provisioning (admin) credentials -- used only by app/cli.py::
+  # provision_tenant and the migrate Job to CREATE ROLE/CREATE DATABASE for
+  # each tenant. Running API/worker pods never use these to touch tenant
+  # data directly; each tenant's own narrowly-scoped runtime credentials are
+  # generated at provisioning time and stored encrypted in the management
+  # database (see TENANT_DB_ENCRYPTION_KEY below).
   POSTGRES_USER: "aidocs"
   POSTGRES_PASSWORD: "REPLACE"
+  # Symmetric key (Fernet) encrypting tenant DB passwords at rest in the
+  # management database -- see app/core/crypto.py. In a hardened setup this
+  # belongs in Key Vault via the CSI driver rather than a plain Secret; a
+  # plain Secret is acceptable for now given crypto.py's designed swap-in point.
+  TENANT_DB_ENCRYPTION_KEY: "REPLACE_WITH_GENERATED_FERNET_KEY"
   OPENAI_API_KEY: "REPLACE"
   AZURE_STORAGE_CONNECTION_STRING: ""
