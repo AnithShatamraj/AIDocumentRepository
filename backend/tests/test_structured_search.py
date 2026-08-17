@@ -11,7 +11,7 @@ from sqlalchemy import delete as sql_delete
 
 from app.core.db import AsyncSessionLocal
 from app.core.security import hash_password
-from app.models.catalog import DocumentType
+from app.models.catalog import DocumentType, TypeSchema
 from app.models.constants import RV_AUTO_ACCEPTED, RV_PENDING, VT_TEXT
 from app.models.content import FieldValue
 from app.models.document import Document
@@ -129,6 +129,8 @@ async def resume_scenario():
         finally:
             async with AsyncSessionLocal() as cleanup:
                 await cleanup.execute(sql_delete(Document).where(Document.id == doc_id))
+                await cleanup.execute(sql_delete(TypeSchema).where(TypeSchema.tenant_id == tenant_id))
+                await cleanup.execute(sql_delete(DocumentType).where(DocumentType.tenant_id == tenant_id))
                 await cleanup.execute(sql_delete(Tenant).where(Tenant.id == tenant_id))
                 await cleanup.commit()
 
