@@ -20,9 +20,10 @@ from sqlalchemy import delete, select
 from app.ai import ingestion, prompts
 from app.ai.registry import get_embedder
 from app.core.config import settings
-from app.core.db import SyncSessionLocal
 from app.core.logging import correlation_id, get_logger
+from app.core.mgmt_db import MgmtSyncSessionLocal
 from app.core.redis import publish_doc_event
+from app.core.tenant_db import get_tenant_sync_session
 from app.models.catalog import DocumentType, TypeSchema
 from app.models.constants import (
     DOC_FAILED,
@@ -59,6 +60,7 @@ from app.models.document import (
     DocumentVersion,
     document_type_links,
 )
+from app.models.mgmt import Tenant as MgmtTenant
 from app.models.ops import CostRecord, Notification
 from app.models.pipeline import PipelineRun, PipelineStage
 from app.models.review import ReviewItem
@@ -79,6 +81,18 @@ def _get_stage(db, run_id, name) -> PipelineStage:
     return db.execute(
         select(PipelineStage).where(PipelineStage.run_id == run_id, PipelineStage.name == name)
     ).scalar_one()
+
+
+def _get_tenant_sync(tenant_id: str) -> MgmtTenant:
+    """Resolve a tenant's connection info from the management database. Each
+    task gets `tenant_id` as an explicit argument (never discovered mid-task
+    via a Document/PipelineRun lookup) precisely so this can run BEFORE any
+    tenant-database session opens -- which engine to use depends on it."""
+    mgmt_db = MgmtSyncSessionLocal()
+    try:
+        return mgmt_db.get(MgmtTenant, uuid.UUID(tenant_id))
+    finally:
+        mgmt_db.close()
 
 
 def _latest_version(db, document_id, version) -> DocumentVersion:
@@ -112,9 +126,10 @@ def _record_cost(db, run: PipelineRun, stage: str, out) -> None:
     return tokens, cost
 
 
-def _run_stage(task, run_id: str, name: str, work):
+def _run_stage(task, run_id: str, tenant_id: str, name: str, work):
     """Shared stage lifecycle: timing, status, checkpoint, retry, dead-letter."""
-    db = SyncSessionLocal()
+    tenant = _get_tenant_sync(tenant_id)
+    db = get_tenant_sync_session(tenant)
     try:
         run = db.get(PipelineRun, uuid.UUID(run_id))
         if run.correlation_id:
@@ -128,7 +143,7 @@ def _run_stage(task, run_id: str, name: str, work):
 
         started = _now()
         try:
-            output = work(db, run, stage) or {}
+            output = work(db, run, stage, tenant) or {}
             # Preserve a status the work explicitly set (e.g. SKIPPED); default to SUCCEEDED.
             if stage.status == ST_RUNNING:
                 stage.status = ST_SUCCEEDED
@@ -188,8 +203,10 @@ def _dead_letter(db, run: PipelineRun, stage: str, exc: Exception) -> None:
 
 # ------------------------------------------------------------- orchestration
 @celery_app.task(name="pipeline.start")
-def start_processing(document_id: str, from_stage: str | None = None, corr_id: str | None = None) -> str:
-    db = SyncSessionLocal()
+def start_processing(document_id: str, tenant_id: str, from_stage: str | None = None,
+                     corr_id: str | None = None) -> str:
+    tenant = _get_tenant_sync(tenant_id)
+    db = get_tenant_sync_session(tenant)
     try:
         doc = db.get(Document, uuid.UUID(document_id))
         if doc is None:
@@ -226,17 +243,17 @@ def start_processing(document_id: str, from_stage: str | None = None, corr_id: s
         STAGE_CLASSIFY: stage_classification, STAGE_SUMMARIZE: stage_summarization,
         STAGE_METADATA: stage_metadata, STAGE_CHUNK: stage_chunking, STAGE_EMBED: stage_embedding,
     }
-    sig = chain(*[tasks_by_name[name].si(run_id) for name in PIPELINE_STAGES[start_index:]])
+    sig = chain(*[tasks_by_name[name].si(run_id, tenant_id) for name in PIPELINE_STAGES[start_index:]])
     sig.apply_async()
     return run_id
 
 
 # ------------------------------------------------------------------- stages
 @celery_app.task(bind=True, name="pipeline.text_extraction", max_retries=MAX_RETRIES)
-def stage_text_extraction(self, run_id: str) -> str:
-    def work(db, run, stage):
+def stage_text_extraction(self, run_id: str, tenant_id: str) -> str:
+    def work(db, run, stage, tenant):
         version = _latest_version(db, run.document_id, run.document_version)
-        data = get_storage().get_bytes(version.storage_key)
+        data = get_storage(tenant).get_bytes(version.storage_key)
         doc = db.get(Document, run.document_id)
         parsed = parsing.parse(data, doc.file_type)
         text = parsed.get("text", "")
@@ -253,23 +270,23 @@ def stage_text_extraction(self, run_id: str) -> str:
         return {"chars": len(text), "units": len(parsed.get("units", [])),
                 "anchor_type": parsed.get("anchor_type"), "warning": parsed.get("warning"),
                 "parser": parsed.get("parser"), "ocr_used": parsed.get("ocr_used")}
-    return _run_stage(self, run_id, STAGE_EXTRACT, work)
+    return _run_stage(self, run_id, tenant_id, STAGE_EXTRACT, work)
 
 
 @celery_app.task(bind=True, name="pipeline.document_understanding", max_retries=MAX_RETRIES)
-def stage_understanding(self, run_id: str) -> str:
-    def work(db, run, stage):
+def stage_understanding(self, run_id: str, tenant_id: str) -> str:
+    def work(db, run, stage, tenant):
         version = _latest_version(db, run.document_id, run.document_version)
         u = version.understanding or {}
         units = u.get("units", [])
         return {"anchor_type": u.get("anchor_type"), "unit_count": len(units),
                 "has_positional": any("words" in x for x in units)}
-    return _run_stage(self, run_id, STAGE_UNDERSTAND, work)
+    return _run_stage(self, run_id, tenant_id, STAGE_UNDERSTAND, work)
 
 
 @celery_app.task(bind=True, name="pipeline.classification", max_retries=MAX_RETRIES)
-def stage_classification(self, run_id: str) -> str:
-    def work(db, run, stage):
+def stage_classification(self, run_id: str, tenant_id: str) -> str:
+    def work(db, run, stage, tenant):
         version = _latest_version(db, run.document_id, run.document_version)
         text = version.extracted_text or ""
         doc = db.get(Document, run.document_id)
@@ -331,12 +348,12 @@ def stage_classification(self, run_id: str) -> str:
             _notify_reviewers(db, run.tenant_id, run.document_id, "New document needs categorization")
         return {"labels": [l.__dict__ for l in result.labels], "assigned": assigned,
                 "skip_extraction": skip_extraction, "strategy": result.strategy}
-    return _run_stage(self, run_id, STAGE_CLASSIFY, work)
+    return _run_stage(self, run_id, tenant_id, STAGE_CLASSIFY, work)
 
 
 @celery_app.task(bind=True, name="pipeline.summarization", max_retries=MAX_RETRIES)
-def stage_summarization(self, run_id: str) -> str:
-    def work(db, run, stage):
+def stage_summarization(self, run_id: str, tenant_id: str) -> str:
+    def work(db, run, stage, tenant):
         version = _latest_version(db, run.document_id, run.document_version)
         result = ingestion.summarize_document(version.extracted_text or "")
         db.execute(delete(Summary).where(
@@ -349,12 +366,12 @@ def stage_summarization(self, run_id: str) -> str:
         stage.prompt_version = result.prompt_version
         _record_cost(db, run, STAGE_SUMMARIZE, result)
         return {"strategy": result.strategy, "highlights": len(result.highlights)}
-    return _run_stage(self, run_id, STAGE_SUMMARIZE, work)
+    return _run_stage(self, run_id, tenant_id, STAGE_SUMMARIZE, work)
 
 
 @celery_app.task(bind=True, name="pipeline.metadata_extraction", max_retries=MAX_RETRIES)
-def stage_metadata(self, run_id: str) -> str:
-    def work(db, run, stage):
+def stage_metadata(self, run_id: str, tenant_id: str) -> str:
+    def work(db, run, stage, tenant):
         version = _latest_version(db, run.document_id, run.document_version)
         text = version.extracted_text or ""
         layout_units = (version.understanding or {}).get("units", [])
@@ -386,12 +403,12 @@ def stage_metadata(self, run_id: str) -> str:
             _notify_reviewers(db, run.tenant_id, run.document_id,
                               f"{review_items} extracted field(s) need review")
         return {"fields": total_fields, "pending_review": review_items}
-    return _run_stage(self, run_id, STAGE_METADATA, work)
+    return _run_stage(self, run_id, tenant_id, STAGE_METADATA, work)
 
 
 @celery_app.task(bind=True, name="pipeline.chunking", max_retries=MAX_RETRIES)
-def stage_chunking(self, run_id: str) -> str:
-    def work(db, run, stage):
+def stage_chunking(self, run_id: str, tenant_id: str) -> str:
+    def work(db, run, stage, tenant):
         version = _latest_version(db, run.document_id, run.document_version)
         units = (version.understanding or {}).get("units", [])
         drafts = chunking.chunk_units(units, settings.chunk_tokens, settings.chunk_overlap_tokens)
@@ -406,12 +423,12 @@ def stage_chunking(self, run_id: str) -> str:
                 document_version=run.document_version, ordinal=d.ordinal, content=d.content,
                 page=d.page, anchor=d.anchor, section_title=d.section_title, bbox=d.bbox))
         return {"chunks": len(drafts)}
-    return _run_stage(self, run_id, STAGE_CHUNK, work)
+    return _run_stage(self, run_id, tenant_id, STAGE_CHUNK, work)
 
 
 @celery_app.task(bind=True, name="pipeline.embedding", max_retries=MAX_RETRIES)
-def stage_embedding(self, run_id: str) -> str:
-    def work(db, run, stage):
+def stage_embedding(self, run_id: str, tenant_id: str) -> str:
+    def work(db, run, stage, tenant):
         chunks = db.execute(
             select(Chunk).where(
                 Chunk.document_id == run.document_id, Chunk.document_version == run.document_version
@@ -456,7 +473,7 @@ def stage_embedding(self, run_id: str) -> str:
             link=f"/documents/{doc.id}"))
         _publish(run, "pipeline", "completed", {"status": doc.processing_status})
         return {"embedded": len(chunks)}
-    return _run_stage(self, run_id, STAGE_EMBED, work)
+    return _run_stage(self, run_id, tenant_id, STAGE_EMBED, work)
 
 
 # ------------------------------------------------------- schema-driven extract

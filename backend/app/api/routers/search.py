@@ -5,8 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
-from app.core.db import get_db
+from app.api.deps import get_current_user, get_tenant_db
 from app.models.catalog import DocumentType, TypeSchema
 from app.models.tenant import User
 from app.schemas import SearchHit, SearchRequest, StructuredSearchRequest
@@ -17,7 +16,7 @@ router = APIRouter(prefix="/search", tags=["search"])
 
 
 @router.post("", response_model=list[SearchHit])
-async def semantic_search(body: SearchRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def semantic_search(body: SearchRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     if body.mode == "vector":
         hits = await search.vector_search(db, user, body.query, k=body.k)
     elif body.mode == "keyword":
@@ -31,7 +30,7 @@ async def semantic_search(body: SearchRequest, user: User = Depends(get_current_
 async def searchable_fields(
     document_type_id: str | None = Query(default=None),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Leaf fields available for structured search, flattened from each document
     type's active schema. A free-text field name can't express "any item in
@@ -66,7 +65,7 @@ async def searchable_fields(
 
 
 @router.post("/structured")
-async def structured(body: StructuredSearchRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def structured(body: StructuredSearchRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     results = await structured_search.query(
         db, user, field_key=body.field_key, field_path=body.field_path, field_name=body.field_name,
         op=body.op, value=body.value, value2=body.value2,

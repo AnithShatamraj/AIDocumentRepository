@@ -5,8 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
-from app.core.db import get_db
+from app.api.deps import get_current_user, get_tenant_db
 from app.models.ops import Notification
 from app.models.tenant import User
 
@@ -14,7 +13,7 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 
 @router.get("")
-async def list_notifications(unread_only: bool = False, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_notifications(unread_only: bool = False, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     stmt = select(Notification).where(Notification.user_id == user.id)
     if unread_only:
         stmt = stmt.where(Notification.is_read.is_(False))
@@ -28,7 +27,7 @@ async def list_notifications(unread_only: bool = False, user: User = Depends(get
 
 
 @router.post("/{notification_id}/read")
-async def mark_read(notification_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def mark_read(notification_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     n = await db.get(Notification, notification_id)
     if not n or n.user_id != user.id:
         raise HTTPException(404, "Notification not found")
@@ -38,7 +37,7 @@ async def mark_read(notification_id: str, user: User = Depends(get_current_user)
 
 
 @router.post("/read-all")
-async def mark_all_read(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def mark_all_read(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     rows = (await db.execute(select(Notification).where(Notification.user_id == user.id, Notification.is_read.is_(False)))).scalars().all()
     for n in rows:
         n.is_read = True

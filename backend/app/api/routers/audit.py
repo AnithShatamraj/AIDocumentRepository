@@ -5,8 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
-from app.core.db import get_db
+from app.api.deps import get_tenant_db, require_admin
 from app.models.ops import AuditLog
 from app.models.tenant import User
 
@@ -19,7 +18,7 @@ async def list_audit(
     object_id: str | None = Query(default=None),
     limit: int = Query(default=100, le=500),
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     stmt = select(AuditLog).where(AuditLog.tenant_id == admin.tenant_id)
     if event_type:

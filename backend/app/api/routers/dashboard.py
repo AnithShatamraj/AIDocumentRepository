@@ -7,8 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import String, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
-from app.core.db import get_db
+from app.api.deps import get_current_user, get_tenant_db
 from app.models.catalog import DocumentType
 from app.models.constants import RV_AUTO_ACCEPTED
 from app.models.content import FieldValue
@@ -26,7 +25,7 @@ def _now():
 
 
 @router.get("")
-async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
 

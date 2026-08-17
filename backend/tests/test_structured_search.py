@@ -15,7 +15,7 @@ from app.models.catalog import DocumentType
 from app.models.constants import RV_AUTO_ACCEPTED, RV_PENDING, VT_TEXT
 from app.models.content import FieldValue
 from app.models.document import Document
-from app.models.tenant import Tenant, User
+from app.models.tenant import User
 from app.services import structured_search
 from app.services.fields import list_leaf_paths, validate_schema
 
@@ -71,37 +71,37 @@ def test_value_filter_prioritizes_date_over_numeric_substring():
 @pytest.fixture
 async def resume_scenario():
     async with AsyncSessionLocal() as db:
-        t = Tenant(name="T", slug=f"t-{uuid.uuid4().hex[:8]}")
-        db.add(t)
-        await db.flush()
-        owner = User(tenant_id=t.id, email=f"owner-{uuid.uuid4().hex[:6]}@t.test",
+        # tenant_id is a plain UUID now (no local Tenant row/FK -- see the
+        # equivalent note in test_permissions.py).
+        tenant_id = uuid.uuid4()
+        owner = User(tenant_id=tenant_id, email=f"owner-{uuid.uuid4().hex[:6]}@t.test",
                     hashed_password=hash_password("x" * 10), role="viewer")
         db.add(owner)
         await db.flush()
 
-        dtype = DocumentType(tenant_id=t.id, name="Resume", description="CV")
+        dtype = DocumentType(tenant_id=tenant_id, name="Resume", description="CV")
         db.add(dtype)
         await db.flush()
 
-        doc = Document(tenant_id=t.id, owner_id=owner.id, name="cv.txt", file_type="txt",
+        doc = Document(tenant_id=tenant_id, owner_id=owner.id, name="cv.txt", file_type="txt",
                        current_version=1, processing_status="processed")
         db.add(doc)
         await db.flush()
 
         # work_experience: a list of objects, each with organization + designation —
         # the exact shape a resume extraction produces.
-        we = FieldValue(id=uuid.uuid4(), tenant_id=t.id, document_id=doc.id, document_version=1,
+        we = FieldValue(id=uuid.uuid4(), tenant_id=tenant_id, document_id=doc.id, document_version=1,
                         document_type_id=dtype.id, field_key="work_experience",
                         field_path="work_experience", field_name="Work Experience",
                         node_kind="list", data_type="list")
         db.add(we)
         await db.flush()
 
-        item0 = FieldValue(id=uuid.uuid4(), tenant_id=t.id, document_id=doc.id, document_version=1,
+        item0 = FieldValue(id=uuid.uuid4(), tenant_id=tenant_id, document_id=doc.id, document_version=1,
                            document_type_id=dtype.id, parent_id=we.id, field_key="role",
                            field_path="work_experience[0]", field_name="Work Experience #1",
                            node_kind="object", data_type="object", ordinal=0)
-        item1 = FieldValue(id=uuid.uuid4(), tenant_id=t.id, document_id=doc.id, document_version=1,
+        item1 = FieldValue(id=uuid.uuid4(), tenant_id=tenant_id, document_id=doc.id, document_version=1,
                            document_type_id=dtype.id, parent_id=we.id, field_key="role",
                            field_path="work_experience[1]", field_name="Work Experience #2",
                            node_kind="object", data_type="object", ordinal=1)
@@ -109,7 +109,7 @@ async def resume_scenario():
         await db.flush()
 
         def leaf(parent, key, path, name, value, status=RV_AUTO_ACCEPTED):
-            return FieldValue(id=uuid.uuid4(), tenant_id=t.id, document_id=doc.id, document_version=1,
+            return FieldValue(id=uuid.uuid4(), tenant_id=tenant_id, document_id=doc.id, document_version=1,
                               document_type_id=dtype.id, parent_id=parent.id, field_key=key,
                               field_path=path, field_name=name, node_kind="scalar", data_type="string",
                               raw_value=value, value_type=VT_TEXT, value_text=value,
@@ -123,13 +123,13 @@ async def resume_scenario():
         ])
         await db.commit()
 
-        tenant_id, doc_id = t.id, doc.id
+        doc_id = doc.id
         try:
             yield {"owner": owner, "doc": doc, "dtype": dtype}
         finally:
             async with AsyncSessionLocal() as cleanup:
                 await cleanup.execute(sql_delete(Document).where(Document.id == doc_id))
-                await cleanup.execute(sql_delete(Tenant).where(Tenant.id == tenant_id))
+                await cleanup.execute(sql_delete(User).where(User.tenant_id == tenant_id))
                 await cleanup.commit()
 
 

@@ -1,5 +1,14 @@
 """Alembic environment — URL and metadata come from the app so there is one
-source of truth for both `init-db` (create_all) and migrations."""
+source of truth for both `init-db` (create_all) and migrations.
+
+This is the TENANT-schema chain, applied to every tenant's own database (as
+opposed to alembic_mgmt/, applied once to the management database). Callers
+that need to target a specific tenant's database -- app/cli.py::provision_tenant,
+migrate_tenant -- set `sqlalchemy.url` on the Config object before invoking
+`command.upgrade(...)`; that pre-set value is respected here and only falls
+back to the single dev database when nothing else was provided, so a plain
+`alembic upgrade head` from the CLI still works unchanged.
+"""
 from __future__ import annotations
 
 from logging.config import fileConfig
@@ -12,7 +21,8 @@ from app.core.config import settings
 from app.core.db import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url_sync)
+db_url = config.get_main_option("sqlalchemy.url") or settings.database_url_sync
+config.set_main_option("sqlalchemy.url", db_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -22,7 +32,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.database_url_sync,
+        url=db_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

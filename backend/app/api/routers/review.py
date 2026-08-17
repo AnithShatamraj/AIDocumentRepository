@@ -7,8 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_reviewer
-from app.core.db import get_db
+from app.api.deps import get_tenant_db, require_reviewer
 from app.models.constants import (
     AUDIT_REVIEW,
     DOC_PROCESSED,
@@ -51,7 +50,7 @@ async def list_queue(
     min_confidence: float | None = Query(default=None),
     sort: str = Query(default="age"),  # age | confidence
     user: User = Depends(require_reviewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
@@ -71,7 +70,7 @@ async def list_queue(
 
 
 @router.post("/{review_id}/claim", response_model=ReviewOut)
-async def claim(review_id: str, user: User = Depends(require_reviewer), db: AsyncSession = Depends(get_db)):
+async def claim(review_id: str, user: User = Depends(require_reviewer), db: AsyncSession = Depends(get_tenant_db)):
     item = await _readable_item(db, user, review_id)
     # Release stale claims first.
     if item.claimed_by and item.claimed_at and (_now() - item.claimed_at).total_seconds() > CLAIM_TIMEOUT_MIN * 60:
@@ -85,7 +84,7 @@ async def claim(review_id: str, user: User = Depends(require_reviewer), db: Asyn
 
 
 @router.post("/{review_id}/resolve", response_model=ReviewOut)
-async def resolve(review_id: str, body: ReviewResolve, user: User = Depends(require_reviewer), db: AsyncSession = Depends(get_db)):
+async def resolve(review_id: str, body: ReviewResolve, user: User = Depends(require_reviewer), db: AsyncSession = Depends(get_tenant_db)):
     item = await _readable_item(db, user, review_id)
     if item.claimed_by and item.claimed_by != user.id:
         raise HTTPException(409, "Item claimed by another reviewer")
@@ -125,8 +124,10 @@ async def resolve(review_id: str, body: ReviewResolve, user: User = Depends(requ
             doc.processing_status = DOC_PROCESSED
             await db.commit()
             # FieldValue was skipped for the uncategorized doc — run it now.
+            import uuid as _uuid
+
             from app.worker.tasks import start_processing
-            start_processing.delay(str(item.document_id), STAGE_METADATA)
+            start_processing.delay(str(item.document_id), str(item.tenant_id), STAGE_METADATA, str(_uuid.uuid4()))
         elif body.action == "reject":
             pass
         else:

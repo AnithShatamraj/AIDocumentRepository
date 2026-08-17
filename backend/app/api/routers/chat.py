@@ -9,9 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.deps import get_current_user
-from app.core.db import AsyncSessionLocal, get_db
+from app.api.deps import get_current_tenant, get_current_user, get_tenant_db
+from app.core.tenant_db import get_tenant_session
 from app.models.chat import Conversation, Message
+from app.models.mgmt import Tenant as MgmtTenant
 from app.models.tenant import User
 from app.schemas import ChatRequest
 from app.services import chat
@@ -20,7 +21,7 @@ router = APIRouter(tags=["chat"])
 
 
 @router.get("/conversations")
-async def list_conversations(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_conversations(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     rows = (await db.execute(
         select(Conversation).where(Conversation.user_id == user.id).order_by(Conversation.updated_at.desc())
     )).scalars().all()
@@ -28,7 +29,7 @@ async def list_conversations(user: User = Depends(get_current_user), db: AsyncSe
 
 
 @router.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_conversation(conversation_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     conv = await db.get(Conversation, conversation_id)
     if not conv or conv.user_id != user.id:
         raise HTTPException(404, "Conversation not found")
@@ -40,7 +41,9 @@ async def get_conversation(conversation_id: str, user: User = Depends(get_curren
 
 
 @router.post("/chat")
-async def chat_stream(body: ChatRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
+                      tenant: MgmtTenant = Depends(get_current_tenant),
+                      db: AsyncSession = Depends(get_tenant_db)):
     # Resolve or create the conversation up front (owned by caller).
     if body.conversation_id:
         conv = await db.get(Conversation, body.conversation_id)
@@ -55,8 +58,8 @@ async def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
     user_id = user.id
 
     async def event_gen():
-        # Fresh session for the streaming lifetime.
-        async with AsyncSessionLocal() as sdb:
+        # Fresh session for the streaming lifetime, on the same tenant's database.
+        async for sdb in get_tenant_session(tenant):
             u = await sdb.get(User, user_id)
             c = await sdb.get(Conversation, conv_id)
             yield {"event": "start", "data": json.dumps({"conversation_id": str(conv_id)})}

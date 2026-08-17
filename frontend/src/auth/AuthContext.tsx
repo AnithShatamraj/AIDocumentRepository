@@ -12,7 +12,7 @@ export interface User {
 interface AuthCtx {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (tenantSlug: string, email: string, password: string) => Promise<void>;
   logout: () => void;
 }
 
@@ -34,8 +34,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false));
   }, []);
 
-  async function login(email: string, password: string) {
-    const res = await api.post("/api/auth/login", { email, password });
+  async function login(tenantSlug: string, email: string, password: string) {
+    const res = await api.post("/api/auth/login", { tenant_slug: tenantSlug, email, password });
     tokenStore.set(res.access_token);
     setUser(res.user);
   }

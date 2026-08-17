@@ -11,8 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_admin
-from app.core.db import get_db
+from app.api.deps import get_current_user, get_tenant_db, require_admin
 from app.models.catalog import DocumentType, TypeSchema
 from app.models.document import document_type_links
 from app.models.tenant import User
@@ -63,14 +62,14 @@ async def _active_fields(db: AsyncSession, dt: DocumentType) -> tuple[int | None
 
 
 @router.get("", response_model=list[DocumentTypeOut])
-async def list_types(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_types(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     rows = await db.execute(
         select(DocumentType).where(DocumentType.tenant_id == user.tenant_id).order_by(DocumentType.name))
     return [DocumentTypeOut.model_validate(t) for t in rows.scalars().all()]
 
 
 @router.get("/{type_id}")
-async def get_type(type_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_type(type_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != user.tenant_id:
         raise HTTPException(404, "Document type not found")
@@ -83,7 +82,7 @@ async def get_type(type_id: str, user: User = Depends(get_current_user), db: Asy
 
 
 @router.get("/{type_id}/schema")
-async def get_schema(type_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_schema(type_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     """Active field tree plus the compiled JSON Schema (useful for debugging)."""
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != user.tenant_id:
@@ -95,7 +94,7 @@ async def get_schema(type_id: str, user: User = Depends(get_current_user), db: A
 
 
 @router.get("/{type_id}/versions")
-async def list_versions(type_id: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def list_versions(type_id: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != admin.tenant_id:
         raise HTTPException(404, "Document type not found")
@@ -109,7 +108,7 @@ async def list_versions(type_id: str, admin: User = Depends(require_admin), db: 
 
 @router.post("", response_model=DocumentTypeOut, status_code=201)
 async def create_type(body: DocumentTypeCreate, admin: User = Depends(require_admin),
-                      db: AsyncSession = Depends(get_db)):
+                      db: AsyncSession = Depends(get_tenant_db)):
     exists = (await db.execute(
         select(DocumentType).where(DocumentType.tenant_id == admin.tenant_id,
                                    func.lower(DocumentType.name) == body.name.strip().lower())
@@ -133,7 +132,7 @@ async def create_type(body: DocumentTypeCreate, admin: User = Depends(require_ad
 
 @router.patch("/{type_id}", response_model=DocumentTypeOut)
 async def update_type(type_id: str, body: DocumentTypeUpdate, admin: User = Depends(require_admin),
-                      db: AsyncSession = Depends(get_db)):
+                      db: AsyncSession = Depends(get_tenant_db)):
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != admin.tenant_id:
         raise HTTPException(404, "Document type not found")
@@ -160,7 +159,7 @@ async def update_type(type_id: str, body: DocumentTypeUpdate, admin: User = Depe
 
 
 @router.delete("/{type_id}", status_code=204)
-async def delete_type(type_id: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def delete_type(type_id: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != admin.tenant_id:
         raise HTTPException(404, "Document type not found")
