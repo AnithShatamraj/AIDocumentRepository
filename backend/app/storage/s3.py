@@ -9,7 +9,7 @@ from app.storage.base import StorageBackend
 
 
 class S3Storage(StorageBackend):
-    def __init__(self) -> None:
+    def __init__(self, bucket: str) -> None:
         def make_client(endpoint: str | None):
             kwargs = dict(
                 aws_access_key_id=settings.s3_access_key,
@@ -30,9 +30,9 @@ class S3Storage(StorageBackend):
         # docker-internal minio:9000).
         public = settings.s3_public_endpoint_url or internal
         self._public_client = self._client if public == internal else make_client(public)
-        self._bucket = settings.storage_bucket
+        self._bucket = bucket
 
-    def ensure_bucket(self) -> None:
+    def ensure_container(self) -> None:
         try:
             self._client.head_bucket(Bucket=self._bucket)
         except Exception:

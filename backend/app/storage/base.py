@@ -6,6 +6,12 @@ import abc
 
 class StorageBackend(abc.ABC):
     @abc.abstractmethod
+    def ensure_container(self) -> None:
+        """Create this backend's bucket/container if it doesn't exist yet.
+        Called during tenant provisioning; safe to call again (no-op if present)."""
+        ...
+
+    @abc.abstractmethod
     def put_object(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         ...
 

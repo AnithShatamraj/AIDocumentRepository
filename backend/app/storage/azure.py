@@ -8,7 +8,7 @@ from app.storage.base import StorageBackend
 
 
 class AzureBlobStorage(StorageBackend):
-    def __init__(self) -> None:
+    def __init__(self, container: str) -> None:
         from azure.storage.blob import BlobServiceClient
 
         if settings.azure_storage_connection_string:
@@ -25,7 +25,15 @@ class AzureBlobStorage(StorageBackend):
             )
         else:
             raise RuntimeError("Azure storage requires connection string or account URL")
-        self._container = settings.storage_bucket
+        self._container = container
+
+    def ensure_container(self) -> None:
+        from azure.core.exceptions import ResourceExistsError
+
+        try:
+            self._svc.create_container(self._container)
+        except ResourceExistsError:
+            pass
 
     def _blob(self, key: str):
         return self._svc.get_blob_client(container=self._container, blob=key)
