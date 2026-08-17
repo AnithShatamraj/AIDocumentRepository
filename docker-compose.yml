@@ -103,11 +103,14 @@ services:
       S3_ENDPOINT_URL: http://minio:9000
       S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
       DOCLING_URL: http://docling:5001
+      MGMT_POSTGRES_DB: aidocs_mgmt
     # Bind-mount source so uvicorn --reload picks up edits without a rebuild.
     volumes:
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic
       - ./backend/alembic.ini:/app/alembic.ini
+      - ./backend/alembic_mgmt:/app/alembic_mgmt
+      - ./backend/alembic_mgmt.ini:/app/alembic_mgmt.ini
     ports:
       - "8000:8000"
     depends_on:
@@ -118,7 +121,8 @@ services:
       minio-setup:
         condition: service_completed_successfully
     command: >
-      sh -c "python -m app.cli init-db &&
+      sh -c "python -m app.cli create-mgmt-db &&
+             python -m app.cli migrate-mgmt &&
              python -m app.cli seed &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
@@ -133,10 +137,13 @@ services:
       S3_ENDPOINT_URL: http://minio:9000
       S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
       DOCLING_URL: http://docling:5001
+      MGMT_POSTGRES_DB: aidocs_mgmt
     volumes:
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic
       - ./backend/alembic.ini:/app/alembic.ini
+      - ./backend/alembic_mgmt:/app/alembic_mgmt
+      - ./backend/alembic_mgmt.ini:/app/alembic_mgmt.ini
     depends_on:
       api:
         condition: service_started

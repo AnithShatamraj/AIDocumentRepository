@@ -16,7 +16,7 @@ class AuditLog(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+        PGUUID(as_uuid=True), nullable=False, index=True
     )
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -33,7 +33,7 @@ class Notification(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+        PGUUID(as_uuid=True), nullable=False, index=True
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -54,7 +54,7 @@ class PromptVersion(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True
+        PGUUID(as_uuid=True), nullable=True, index=True
     )
     key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # classify | summarize | extract | chat
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -69,7 +69,7 @@ class AIConfig(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+        PGUUID(as_uuid=True), nullable=False, unique=True, index=True
     )
     provider_overrides: Mapped[dict] = mapped_column(JSONB, default=dict)  # {stage: {provider, model}}
     confidence_thresholds: Mapped[dict] = mapped_column(JSONB, default=dict)  # {category/field: float}
@@ -83,7 +83,7 @@ class CostRecord(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+        PGUUID(as_uuid=True), nullable=False, index=True
     )
     document_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True

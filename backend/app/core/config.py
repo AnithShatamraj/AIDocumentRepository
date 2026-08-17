@@ -26,11 +26,24 @@ class Settings(BaseSettings):
     api_cors_origins: str = "http://localhost:5173,http://localhost:3000"
 
     # --- Database ---
+    # postgres_user/postgres_password double as the platform-provisioning
+    # (admin) credentials used to CREATE ROLE/CREATE DATABASE for new tenants --
+    # distinct in *role* from any tenant's own narrowly-scoped db_role, even
+    # though in a single-server dev setup they're the same server. Runtime
+    # request handling never uses these directly once a tenant is provisioned;
+    # it uses that tenant's own encrypted credentials from the management DB.
     postgres_user: str = "aidocs"
     postgres_password: str = "aidocs"
     postgres_db: str = "aidocs"
     postgres_host: str = "localhost"
     postgres_port: int = 5432
+
+    # --- Management database (tenant registry, connection info, platform config) ---
+    mgmt_postgres_db: str = "aidocs_mgmt"
+    # Symmetric key (Fernet) encrypting tenant DB passwords at rest in the
+    # management DB. Empty = derived from secret_key for zero-config local dev;
+    # production must set this explicitly. See app/core/crypto.py.
+    tenant_db_encryption_key: str = ""
 
     # --- Redis ---
     redis_host: str = "localhost"
@@ -38,8 +51,10 @@ class Settings(BaseSettings):
     redis_db: int = 0
 
     # --- Object storage ---
+    # Bucket/container is per-tenant now (see models/mgmt.py, app/cli.py::
+    # provision_tenant) -- this is just the platform-wide provider default
+    # assigned to newly-provisioned tenants.
     storage_provider: Literal["minio", "s3", "azure", "gcs"] = "minio"
-    storage_bucket: str = "aidocs"
     s3_endpoint_url: str = "http://localhost:9000"
     # Endpoint used when SIGNING presigned URLs — must be resolvable by the
     # browser. In docker-compose the API talks to minio:9000 internally, but
@@ -111,6 +126,22 @@ class Settings(BaseSettings):
         return (
             f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mgmt_database_url_async(self) -> str:
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.mgmt_postgres_db}"
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def mgmt_database_url_sync(self) -> str:
+        return (
+            f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.mgmt_postgres_db}"
         )
 
     @computed_field  # type: ignore[prop-decorator]

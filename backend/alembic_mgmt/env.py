@@ -1,13 +1,9 @@
-"""Alembic environment — URL and metadata come from the app so there is one
-source of truth for both `init-db` (create_all) and migrations.
-
-This is the TENANT-schema chain, applied to every tenant's own database (as
-opposed to alembic_mgmt/, applied once to the management database). Callers
-that need to target a specific tenant's database -- app/cli.py::provision_tenant,
-migrate_tenant -- set `sqlalchemy.url` on the Config object before invoking
-`command.upgrade(...)`; that pre-set value is respected here and only falls
-back to the single dev database when nothing else was provided, so a plain
-`alembic upgrade head` from the CLI still works unchanged.
+"""Alembic environment for the MANAGEMENT database chain -- completely
+separate from `alembic/env.py` (the tenant-schema chain). Only
+`app.models.mgmt` is imported, so `target_metadata` never contains a
+tenant-schema table, and this chain always targets the one management
+database (never an arbitrary tenant's database -- that's what the tenant
+chain's `-x db_url` override is for).
 """
 from __future__ import annotations
 
@@ -16,23 +12,22 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-import app.models  # noqa: F401  (register every table on the metadata)
+import app.models.mgmt  # noqa: F401  (register the tenants table on MgmtBase.metadata)
 from app.core.config import settings
-from app.core.db import Base
+from app.core.mgmt_db import MgmtBase
 
 config = context.config
-db_url = config.get_main_option("sqlalchemy.url") or settings.database_url_sync
-config.set_main_option("sqlalchemy.url", db_url)
+config.set_main_option("sqlalchemy.url", settings.mgmt_database_url_sync)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = Base.metadata
+target_metadata = MgmtBase.metadata
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=db_url,
+        url=settings.mgmt_database_url_sync,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

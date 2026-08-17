@@ -9,9 +9,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import client_ip, get_current_user, require_reviewer
+from app.api.deps import client_ip, get_current_tenant, get_current_user, get_tenant_db, require_reviewer
 from app.core.config import settings
-from app.core.db import get_db
 from app.models.catalog import DocumentType
 from app.models.constants import (
     AUDIT_DELETE,
@@ -36,6 +35,7 @@ from app.models.constants import (
 )
 from app.models.content import Classification, FieldValue, Summary
 from app.models.document import Document, DocumentVersion
+from app.models.mgmt import Tenant as MgmtTenant
 from app.models.review import ReviewItem
 from app.models.tenant import User
 from app.schemas import DocumentDetail, DocumentOut, ExtractionReview, PresignedUrl
@@ -92,7 +92,7 @@ class NameConflict(Exception):
         self.name, self.suggestion = name, suggestion
 
 
-async def _create_document(db, user, filename, data, description, *, name=None,
+async def _create_document(db, user, tenant, filename, data, description, *, name=None,
                            document_type_id=None) -> tuple[Document, dict]:
     """Create a document, honouring name uniqueness and the duplicate policy.
 
@@ -125,7 +125,7 @@ async def _create_document(db, user, filename, data, description, *, name=None,
     await db.flush()
 
     key = _storage_key(user.tenant_id, doc.id, 1, filename)
-    await asyncio.to_thread(get_storage().put_object, key, data, mime_type)
+    await asyncio.to_thread(get_storage(tenant).put_object, key, data, mime_type)
     db.add(DocumentVersion(
         tenant_id=user.tenant_id, document_id=doc.id, version=1, storage_key=key,
         file_size=len(data), content_hash=content_hash, mime_type=mime_type, uploaded_by=user.id))
@@ -175,15 +175,15 @@ async def _grant_read(db, user, doc: Document) -> None:
                 link=f"/documents/{doc.id}"))
 
 
-def _trigger_pipeline(document_id, from_stage=None):
+def _trigger_pipeline(document_id, tenant_id, from_stage=None):
     from app.worker.tasks import start_processing
 
-    start_processing.delay(str(document_id), from_stage, str(uuid.uuid4()))
+    start_processing.delay(str(document_id), str(tenant_id), from_stage, str(uuid.uuid4()))
 
 
 @router.get("/name-available")
 async def name_available(name: str = Query(...), user: User = Depends(get_current_user),
-                         db: AsyncSession = Depends(get_db)):
+                         db: AsyncSession = Depends(get_tenant_db)):
     """Live check for the upload dialog."""
     taken = await ingest_policy.name_taken(db, user.tenant_id, name)
     return {"name": name, "available": not taken,
@@ -198,7 +198,8 @@ async def upload(
     name: str | None = Form(default=None),
     document_type_id: str | None = Form(default=None),  # omit / "auto" = auto-detect
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    tenant: MgmtTenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     data = await file.read()
     type_id = None
@@ -208,7 +209,7 @@ async def upload(
             raise HTTPException(400, "Unknown document type")
         type_id = dt.id
     try:
-        doc, meta = await _create_document(db, user, file.filename, data, description,
+        doc, meta = await _create_document(db, user, tenant, file.filename, data, description,
                                            name=name, document_type_id=type_id)
     except mime.UploadValidationError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
@@ -224,7 +225,7 @@ async def upload(
     await db.commit()
     # Only fresh content needs the (paid) pipeline; clones and links reuse results.
     if meta.get("action") == "new":
-        _trigger_pipeline(doc.id)
+        _trigger_pipeline(doc.id, tenant.id)
     return {"document": DocumentOut.model_validate(doc).model_dump(), **meta}
 
 
@@ -233,19 +234,20 @@ async def bulk_upload(
     request: Request,
     files: list[UploadFile] = File(...),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    tenant: MgmtTenant = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     results = []
     for f in files:
         data = await f.read()
         try:
-            doc, meta = await _create_document(db, user, f.filename, data, "")
+            doc, meta = await _create_document(db, user, tenant, f.filename, data, "")
             await audit.log_event(db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_UPLOAD,
                                   object_type="document", object_id=doc.id,
                                   detail={"action": meta.get("action")}, commit=False)
             await db.commit()
             if meta.get("action") == "new":
-                _trigger_pipeline(doc.id)
+                _trigger_pipeline(doc.id, tenant.id)
             results.append({"filename": f.filename, "status": "accepted", "document_id": str(doc.id),
                             "action": meta.get("action"), "duplicate_of": meta.get("duplicate_of"),
                             "message": meta.get("message")})
@@ -255,10 +257,10 @@ async def bulk_upload(
         except NameConflict as e:
             # Bulk upload shouldn't stall on a name clash — take the suggestion.
             await db.rollback()
-            doc, meta = await _create_document(db, user, f.filename, data, "", name=e.suggestion)
+            doc, meta = await _create_document(db, user, tenant, f.filename, data, "", name=e.suggestion)
             await db.commit()
             if meta.get("action") == "new":
-                _trigger_pipeline(doc.id)
+                _trigger_pipeline(doc.id, tenant.id)
             results.append({"filename": f.filename, "status": "accepted", "document_id": str(doc.id),
                             "action": meta.get("action"), "renamed_to": e.suggestion})
     return {"results": results}
@@ -269,7 +271,7 @@ async def list_documents(
     q: str | None = Query(default=None),
     status_filter: str | None = Query(default=None, alias="status"),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
@@ -284,7 +286,7 @@ async def list_documents(
 
 
 @router.get("/{document_id}", response_model=DocumentDetail)
-async def get_document(document_id: str, request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_document(document_id: str, request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
         raise HTTPException(404, "Document not found")
@@ -319,7 +321,8 @@ async def get_document(document_id: str, request: Request, user: User = Depends(
 @router.get("/{document_id}/download", response_model=PresignedUrl)
 async def download(document_id: str, request: Request, version: int | None = Query(default=None),
                    disposition: str = Query(default="attachment"),
-                   user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                   user: User = Depends(get_current_user), tenant: MgmtTenant = Depends(get_current_tenant),
+                   db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
         raise HTTPException(404, "Document not found")
@@ -331,7 +334,7 @@ async def download(document_id: str, request: Request, version: int | None = Que
         raise HTTPException(404, "Version not found")
     # inline => no Content-Disposition header, so the viewer can render it in-browser.
     filename = None if disposition == "inline" else doc.name
-    url = await asyncio.to_thread(get_storage().presigned_get_url, dv.storage_key, 900, filename)
+    url = await asyncio.to_thread(get_storage(tenant).presigned_get_url, dv.storage_key, 900, filename)
     await audit.log_event(db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_DOWNLOAD,
                           object_type="document", object_id=doc.id,
                           detail={"version": v, "disposition": disposition}, ip_address=client_ip(request))
@@ -366,7 +369,8 @@ def _render_page_png(data: bytes, page_no: int, scale: float) -> bytes:
 @router.get("/{document_id}/pages/{page_no}/image")
 async def page_image(document_id: str, page_no: int, version: int | None = Query(default=None),
                      scale: float = Query(default=2.0, ge=0.5, le=4.0),
-                     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                     user: User = Depends(get_current_user), tenant: MgmtTenant = Depends(get_current_tenant),
+                     db: AsyncSession = Depends(get_tenant_db)):
     """Server-rendered page raster — viewer fallback for PDFs pdf.js can't paint."""
     from fastapi import Response
 
@@ -382,7 +386,7 @@ async def page_image(document_id: str, page_no: int, version: int | None = Query
 
     data = _PDF_CACHE.get(dv.storage_key)
     if data is None:
-        data = await asyncio.to_thread(get_storage().get_bytes, dv.storage_key)
+        data = await asyncio.to_thread(get_storage(tenant).get_bytes, dv.storage_key)
         if len(_PDF_CACHE) >= _PDF_CACHE_MAX:
             _PDF_CACHE.pop(next(iter(_PDF_CACHE)))
         _PDF_CACHE[dv.storage_key] = data
@@ -400,7 +404,7 @@ async def review_extraction(
     field_value_id: str,
     body: ExtractionReview,
     user: User = Depends(require_reviewer),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Accept/reject a single extracted value from the document viewer.
 
@@ -458,7 +462,7 @@ async def review_extraction(
 @router.get("/{document_id}/layout")
 async def layout(document_id: str, version: int | None = Query(default=None),
                  include_blocks: bool = Query(default=False),
-                 user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                 user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     """Per-page dimensions (+ optional layout blocks) for viewer overlays."""
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
@@ -482,7 +486,7 @@ async def layout(document_id: str, version: int | None = Query(default=None),
 
 
 @router.get("/{document_id}/versions")
-async def list_versions(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def list_versions(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
         raise HTTPException(404, "Document not found")
@@ -496,7 +500,9 @@ async def list_versions(document_id: str, user: User = Depends(get_current_user)
 
 @router.post("/{document_id}/versions", response_model=DocumentOut, status_code=201)
 async def upload_new_version(document_id: str, file: UploadFile = File(...),
-                             user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                             user: User = Depends(get_current_user),
+                             tenant: MgmtTenant = Depends(get_current_tenant),
+                             db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.has_permission(db, user, doc.id, PERM_UPDATE):
         raise HTTPException(404, "Document not found or no update permission")
@@ -507,31 +513,32 @@ async def upload_new_version(document_id: str, file: UploadFile = File(...),
         raise HTTPException(400, str(e))
     new_v = doc.current_version + 1
     key = _storage_key(user.tenant_id, doc.id, new_v, file.filename)
-    await asyncio.to_thread(get_storage().put_object, key, data, mime_type)
+    await asyncio.to_thread(get_storage(tenant).put_object, key, data, mime_type)
     db.add(DocumentVersion(tenant_id=user.tenant_id, document_id=doc.id, version=new_v, storage_key=key,
                            file_size=len(data), content_hash=sha256_hex(data), mime_type=mime_type, uploaded_by=user.id))
     doc.current_version = new_v
     doc.file_size = len(data)
     doc.processing_status = DOC_PENDING
     await db.commit()
-    _trigger_pipeline(doc.id)
+    _trigger_pipeline(doc.id, tenant.id)
     return DocumentOut.model_validate(doc)
 
 
 @router.post("/{document_id}/reprocess", response_model=dict)
 async def reprocess(document_id: str, from_stage: str | None = Query(default=None),
-                    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                    user: User = Depends(get_current_user), tenant: MgmtTenant = Depends(get_current_tenant),
+                    db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.has_permission(db, user, doc.id, PERM_UPDATE):
         raise HTTPException(404, "Document not found or no update permission")
     if from_stage and from_stage not in PIPELINE_STAGES:
         raise HTTPException(400, f"from_stage must be one of {PIPELINE_STAGES}")
-    _trigger_pipeline(doc.id, from_stage)
+    _trigger_pipeline(doc.id, tenant.id, from_stage)
     return {"status": "queued", "document_id": str(doc.id), "from_stage": from_stage}
 
 
 @router.delete("/{document_id}", status_code=204)
-async def soft_delete(document_id: str, request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def soft_delete(document_id: str, request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.has_permission(db, user, doc.id, PERM_DELETE):
         raise HTTPException(404, "Document not found or no delete permission")
@@ -543,7 +550,7 @@ async def soft_delete(document_id: str, request: Request, user: User = Depends(g
 
 
 @router.post("/{document_id}/restore", response_model=DocumentOut)
-async def restore(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def restore(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or doc.tenant_id != user.tenant_id:
         raise HTTPException(404, "Document not found")

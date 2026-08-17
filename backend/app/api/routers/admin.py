@@ -5,9 +5,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import get_tenant_db, require_admin
 from app.core.config import settings
-from app.core.db import get_db
 from app.models.constants import AUDIT_CONFIG_CHANGE
 from app.models.ops import AIConfig, PromptVersion
 from app.models.tenant import User
@@ -31,7 +30,7 @@ async def _get_or_create_config(db, tenant_id) -> AIConfig:
 
 
 @router.get("/config")
-async def get_config(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def get_config(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
     cfg = await _get_or_create_config(db, admin.tenant_id)
     return {
         "provider_overrides": cfg.provider_overrides,
@@ -48,7 +47,7 @@ async def get_config(admin: User = Depends(require_admin), db: AsyncSession = De
 
 
 @router.put("/config")
-async def update_config(body: ThresholdUpdate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def update_config(body: ThresholdUpdate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
     cfg = await _get_or_create_config(db, admin.tenant_id)
     if body.confidence_thresholds is not None:
         cfg.confidence_thresholds = body.confidence_thresholds
@@ -64,7 +63,7 @@ async def update_config(body: ThresholdUpdate, admin: User = Depends(require_adm
 
 
 @router.get("/prompts")
-async def list_prompts(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def list_prompts(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
     rows = (await db.execute(
         select(PromptVersion).where((PromptVersion.tenant_id == admin.tenant_id) | (PromptVersion.tenant_id.is_(None)))
         .order_by(PromptVersion.key, PromptVersion.version.desc())
@@ -74,7 +73,7 @@ async def list_prompts(admin: User = Depends(require_admin), db: AsyncSession = 
 
 
 @router.post("/prompts")
-async def create_prompt(body: PromptVersionCreate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def create_prompt(body: PromptVersionCreate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
     maxv = (await db.execute(
         select(func.coalesce(func.max(PromptVersion.version), 0)).where(
             PromptVersion.tenant_id == admin.tenant_id, PromptVersion.key == body.key)

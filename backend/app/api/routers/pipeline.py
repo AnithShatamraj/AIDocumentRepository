@@ -9,11 +9,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.deps import get_current_user
-from app.core.db import AsyncSessionLocal, get_db
+import uuid
+
+from app.api.deps import get_current_user, get_tenant_db
+from app.core.mgmt_db import get_mgmt_db
 from app.core.redis import doc_channel, get_async_redis
 from app.core.security import decode_access_token
+from app.core.tenant_db import get_tenant_session
 from app.models.document import Document
+from app.models.mgmt import Tenant as MgmtTenant
 from app.models.pipeline import PipelineRun, PipelineStage
 from app.models.tenant import User
 from app.services import permissions
@@ -30,7 +34,7 @@ async def _latest_run(db, document_id):
 
 
 @router.get("/pipeline")
-async def pipeline_status(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def pipeline_status(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
         raise HTTPException(404, "Document not found")
@@ -53,13 +57,20 @@ async def pipeline_status(document_id: str, user: User = Depends(get_current_use
 
 
 @router.get("/events")
-async def pipeline_events(document_id: str, token: str = Query(...), db: AsyncSession = Depends(get_db)):
-    # EventSource can't set headers, so auth is via query token.
+async def pipeline_events(document_id: str, token: str = Query(...), mgmt_db: AsyncSession = Depends(get_mgmt_db)):
+    # EventSource can't set headers, so auth is via query token -- meaning
+    # this endpoint can't use the get_current_tenant/get_tenant_db dependency
+    # chain (that reads the Authorization header). Resolve the tenant by hand
+    # from the same token instead, same ordering: tenant first, then a
+    # session on that tenant's own database.
     try:
         payload = decode_access_token(token)
     except Exception:
         raise HTTPException(401, "Invalid token")
-    async with AsyncSessionLocal() as adb:
+    tenant = await mgmt_db.get(MgmtTenant, uuid.UUID(payload["tenant_id"]))
+    if tenant is None or not tenant.is_active:
+        raise HTTPException(401, "Invalid token")
+    async for adb in get_tenant_session(tenant):
         user = await adb.get(User, payload["sub"])
         if not user or not await permissions.can_read(adb, user, document_id):
             raise HTTPException(404, "Document not found")
