@@ -64,6 +64,7 @@ a:hover { text-decoration: underline; }
   justify-content: space-between; padding: 0 24px; background: var(--surface);
 }
 .content { padding: 24px; flex: 1; overflow: auto; }
+.content.tight { padding: 10px 16px; }
 
 /* Cards / tiles */
 .grid { display: grid; gap: 16px; }
@@ -183,6 +184,7 @@ h2 { font-size: 16px; margin: 0 0 12px; }
 .list-item .field-row:last-child { border-bottom: none; }
 .pill.entity { background: transparent; border-color: var(--warn); color: var(--warn); margin-left: 6px; }
 .pill.repeats { background: transparent; border-color: var(--primary-2); color: var(--primary-2); }
+.pill.edited { background: transparent; border-color: var(--success); color: var(--success); margin-left: 6px; }
 .field-table { font-size: 12px; }
 .field-table th, .field-table td { padding: 6px 9px; white-space: nowrap; }
 .field-table td.meta-field { cursor: pointer; }
@@ -253,6 +255,12 @@ button.ghost.reject:hover:not(:disabled) { background: var(--danger); color: #ff
 /* ---- Document workspace: full-height, doc always in view ---- */
 .doc-page { display: flex; flex-direction: column; height: calc(100vh - 104px); min-height: 0; }
 .doc-page .page-head { margin-bottom: 12px; flex: none; }
+
+/* Focus mode: topbar hidden + content padding tightened (see .content.tight),
+   so the page only needs to give back that same, now-unclaimed space. */
+.doc-page.focus { height: calc(100vh - 20px); }
+.doc-page.focus .page-head { margin-bottom: 6px; }
+.doc-page.focus .page-head .muted.row { display: none; }
 .doc-workspace { display: flex; flex: 1; min-height: 0; align-items: stretch; }
 .doc-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
