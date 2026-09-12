@@ -198,6 +198,9 @@ class FieldValue(Base, TimestampMixin):
     schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Found by the discovery pass rather than defined in the type's schema.
     is_discovered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # A human directly typed a replacement value (vs. accepting/rejecting the
+    # AI's raw_value as-is) -- durable even if review_status changes again later.
+    is_user_edited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # No ORM self-relationship on purpose: the tree is assembled from a single
     # flat SELECT (cheaper than lazy loads), and Postgres ON DELETE CASCADE on
