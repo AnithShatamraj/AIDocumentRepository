@@ -9,6 +9,7 @@ export interface FieldNode {
   data_type: string;
   ordinal: number | null;
   is_discovered: boolean;
+  is_user_edited: boolean;
   raw_value: string | null;
   value_number: number | null;
   value_date: string | null;
@@ -26,12 +27,13 @@ interface Props {
   reviewing: Record<string, boolean>;
   onJump: (n: FieldNode) => void;
   onReview: (id: string, action: "accept" | "reject") => void;
+  onEdit: (id: string, value: string) => void;
 }
 
 /** Recursive renderer: scalars are rows, objects are indented groups, lists are
- * numbered item cards. Every leaf keeps click-to-highlight and accept/reject at
- * any depth. */
-export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview }: Props) {
+ * numbered item cards. Every leaf keeps click-to-highlight, accept/reject (status
+ * permitting), and manual edit at any depth. */
+export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview, onEdit }: Props) {
   return (
     <>
       {nodes.map((n) =>
@@ -44,6 +46,7 @@ export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview
             busy={!!reviewing[n.id]}
             onJump={onJump}
             onReview={onReview}
+            onEdit={onEdit}
           />
         ) : (
           <ContainerField
@@ -54,6 +57,7 @@ export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview
             reviewing={reviewing}
             onJump={onJump}
             onReview={onReview}
+            onEdit={onEdit}
           />
         )
       )}
@@ -62,12 +66,27 @@ export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview
 }
 
 function ScalarField({
-  node, depth, isPdf, busy, onJump, onReview,
+  node, depth, isPdf, busy, onJump, onReview, onEdit,
 }: {
   node: FieldNode; depth: number; isPdf: boolean; busy: boolean;
   onJump: (n: FieldNode) => void; onReview: (id: string, a: "accept" | "reject") => void;
+  onEdit: (id: string, value: string) => void;
 }) {
-  const clickable = isPdf && (node.source_bbox?.page || node.source_page);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(node.raw_value || "");
+  const clickable = !editing && isPdf && (node.source_bbox?.page || node.source_page);
+
+  function startEdit(e: React.MouseEvent) {
+    e.stopPropagation();
+    setDraft(node.raw_value || "");
+    setEditing(true);
+  }
+
+  function save() {
+    setEditing(false);
+    if (draft !== (node.raw_value || "")) onEdit(node.id, draft);
+  }
+
   return (
     <div
       className={`field-row${clickable ? " meta-field" : ""}`}
@@ -79,11 +98,26 @@ function ScalarField({
         <strong style={{ fontSize: 13 }}>
           {node.field_name}
           {node.is_discovered && <span className="pill entity">entity</span>}
+          {node.is_user_edited && <span className="pill edited">edited</span>}
         </strong>
         <ReviewStatus status={node.review_status} />
       </div>
       <div className="spread">
-        <span>{node.raw_value || <span className="muted">—</span>}</span>
+        {editing ? (
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") save();
+              if (e.key === "Escape") setEditing(false);
+            }}
+            style={{ flex: 1, marginRight: 8 }}
+          />
+        ) : (
+          <span>{node.raw_value || <span className="muted">—</span>}</span>
+        )}
         <span className="muted conf">{Math.round((node.confidence || 0) * 100)}%</span>
       </div>
       <div className="spread" style={{ alignItems: "center" }}>
@@ -94,26 +128,44 @@ function ScalarField({
               }`
             : ""}
         </span>
-        {node.review_status === "pending_review" && (
-          <span className="row" style={{ gap: 6 }} onClick={(e) => e.stopPropagation()}>
-            <button className="ghost approve" disabled={busy} onClick={() => onReview(node.id, "accept")}>
-              ✓ Accept
-            </button>
-            <button className="ghost reject" disabled={busy} onClick={() => onReview(node.id, "reject")}>
-              ✕ Reject
-            </button>
-          </span>
-        )}
+        <span className="row" style={{ gap: 6 }} onClick={(e) => e.stopPropagation()}>
+          {editing ? (
+            <>
+              <button className="ghost approve" onClick={save}>✓ Save</button>
+              <button className="ghost" onClick={() => setEditing(false)}>Cancel</button>
+            </>
+          ) : (
+            <>
+              {node.review_status === "pending_review" && (
+                <>
+                  <button className="ghost approve" disabled={busy} onClick={() => onReview(node.id, "accept")}>
+                    ✓ Accept
+                  </button>
+                  <button className="ghost reject" disabled={busy} onClick={() => onReview(node.id, "reject")}>
+                    ✕ Reject
+                  </button>
+                </>
+              )}
+              {["auto_accepted", "verified", "corrected"].includes(node.review_status) && (
+                <button className="ghost reject" disabled={busy} onClick={() => onReview(node.id, "reject")}>
+                  ✕ Reject
+                </button>
+              )}
+              <button className="ghost" disabled={busy} onClick={startEdit}>✎ Edit</button>
+            </>
+          )}
+        </span>
       </div>
     </div>
   );
 }
 
 function ContainerField({
-  node, depth, isPdf, reviewing, onJump, onReview,
+  node, depth, isPdf, reviewing, onJump, onReview, onEdit,
 }: {
   node: FieldNode; depth: number; isPdf: boolean; reviewing: Record<string, boolean>;
   onJump: (n: FieldNode) => void; onReview: (id: string, a: "accept" | "reject") => void;
+  onEdit: (id: string, value: string) => void;
 }) {
   const [open, setOpen] = useState(true);
   const [asTable, setAsTable] = useState(false);
@@ -200,6 +252,7 @@ function ContainerField({
                     reviewing={reviewing}
                     onJump={onJump}
                     onReview={onReview}
+                    onEdit={onEdit}
                   />
                 </div>
               ))
@@ -211,6 +264,7 @@ function ContainerField({
                 reviewing={reviewing}
                 onJump={onJump}
                 onReview={onReview}
+                onEdit={onEdit}
               />
             )}
         </div>
