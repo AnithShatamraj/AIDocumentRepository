@@ -191,6 +191,18 @@ class ExtractionReview(BaseModel):
     notes: str | None = None
 
 
+class BulkExtractionReview(BaseModel):
+    """Accept or reject every field still pending_review on a document."""
+
+    action: str  # accept | reject
+
+
+class ExtractionEdit(BaseModel):
+    """Directly replace a field's value, regardless of its current review status."""
+
+    value: str
+
+
 # ------------------------------------------------------------------- admin
 class ThresholdUpdate(BaseModel):
     confidence_thresholds: dict[str, float] | None = None

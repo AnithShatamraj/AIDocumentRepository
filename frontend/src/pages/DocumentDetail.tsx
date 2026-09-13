@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, API_BASE, tokenStore } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
 import { CollapsibleSection } from "../components/CollapsibleSection";
+import { useLayoutNav } from "../components/Layout";
 import { PdfViewer, Highlight } from "../components/PdfViewer";
 import { FieldTree, FieldNode } from "../components/FieldTree";
 
@@ -28,12 +29,57 @@ export function DocumentDetail() {
   const [hlNonce, setHlNonce] = useState(0);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [reviewing, setReviewing] = useState<Record<string, boolean>>({});
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [panelW, setPanelW] = useState(() => {
     const saved = parseInt(localStorage.getItem("aidocs_panel_w") || "380", 10);
     return isNaN(saved) ? 380 : Math.min(PANEL_MAX, Math.max(PANEL_MIN, saved));
   });
   const [dragging, setDragging] = useState(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
+
+  // Section open/closed state, lifted out of CollapsibleSection so "Focus
+  // mode" can force them from here. timelineOpen keeps its old
+  // still-processing-defaults-open behavior until the user (or focus mode)
+  // explicitly overrides it.
+  const [summarySectionOpen, setSummarySectionOpen] = useState(true);
+  const [extractedOpen, setExtractedOpen] = useState(true);
+  const [classificationsOpen, setClassificationsOpen] = useState(false);
+  const [timelineOverride, setTimelineOverride] = useState<boolean | null>(null);
+
+  // Focus mode: collapse the nav sidebar + every side-panel section except
+  // Extracted Data, and widen the panel, so the document + extracted fields
+  // get the most screen space. Restores whatever was there before on exit.
+  const { navCollapsed, setNavCollapsed, setChromeHidden } = useLayoutNav();
+  const [focusMode, setFocusMode] = useState(false);
+  const prevNavCollapsed = useRef<boolean | null>(null);
+  const prevPanelW = useRef<number | null>(null);
+
+  function toggleFocusMode() {
+    setFocusMode((f) => {
+      const next = !f;
+      setChromeHidden(next);
+      if (next) {
+        prevNavCollapsed.current = navCollapsed;
+        prevPanelW.current = panelW;
+        setNavCollapsed(true);
+        setPanelW(PANEL_MAX);
+        setSummarySectionOpen(false);
+        setClassificationsOpen(false);
+        setTimelineOverride(false);
+        setExtractedOpen(true);
+      } else {
+        if (prevNavCollapsed.current !== null) setNavCollapsed(prevNavCollapsed.current);
+        if (prevPanelW.current !== null) setPanelW(prevPanelW.current);
+      }
+      return next;
+    });
+  }
+
+  // Safety net: if this page unmounts while focus mode is still on (nav away
+  // without clicking Exit Focus, browser back, etc.), chromeHidden lives in
+  // Layout's shared context -- leaving it on would hide the topbar on every
+  // other page with no way back. Always clear it on unmount.
+  useEffect(() => () => setChromeHidden(false), [setChromeHidden]);
 
   const { data: doc } = useQuery({
     queryKey: ["document", id],
@@ -121,21 +167,51 @@ export function DocumentDetail() {
     }
   }
 
+  async function refreshAfterReview() {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ["document", id] }),
+      qc.invalidateQueries({ queryKey: ["review"] }),
+      qc.invalidateQueries({ queryKey: ["dashboard"] }),
+    ]);
+  }
+
   async function reviewField(extractionId: string, action: "accept" | "reject") {
     setReviewing((r) => ({ ...r, [extractionId]: true }));
     try {
       await api.post(`/api/documents/${id}/extractions/${extractionId}/review`, { action });
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["document", id] }),
-        qc.invalidateQueries({ queryKey: ["review"] }),
-        qc.invalidateQueries({ queryKey: ["dashboard"] }),
-      ]);
+      await refreshAfterReview();
     } finally {
       setReviewing((r) => {
         const next = { ...r };
         delete next[extractionId];
         return next;
       });
+    }
+  }
+
+  async function editField(extractionId: string, value: string) {
+    setReviewing((r) => ({ ...r, [extractionId]: true }));
+    try {
+      await api.post(`/api/documents/${id}/extractions/${extractionId}/edit`, { value });
+      await refreshAfterReview();
+    } finally {
+      setReviewing((r) => {
+        const next = { ...r };
+        delete next[extractionId];
+        return next;
+      });
+    }
+  }
+
+  async function bulkReview(action: "accept" | "reject") {
+    const verb = action === "accept" ? "Accept" : "Reject";
+    if (!window.confirm(`${verb} all remaining pending fields on this document?`)) return;
+    setBulkBusy(true);
+    try {
+      await api.post(`/api/documents/${id}/extractions/bulk-review`, { action });
+      await refreshAfterReview();
+    } finally {
+      setBulkBusy(false);
     }
   }
 
@@ -150,9 +226,10 @@ export function DocumentDetail() {
       0
     );
   const pendingCount = countPending(doc.fields || []);
+  const timelineOpen = timelineOverride ?? doc.processing_status === "processing";
 
   return (
-    <div className="doc-page">
+    <div className={`doc-page${focusMode ? " focus" : ""}`}>
       <div className="page-head spread">
         <div>
           <h1>{doc.name}</h1>
@@ -165,6 +242,10 @@ export function DocumentDetail() {
           </div>
         </div>
         <div className="row">
+          <button className={focusMode ? "" : "ghost"} onClick={toggleFocusMode}
+                  title="Collapse the nav and other sections to give the document and extracted data more room">
+            {focusMode ? "⤢ Exit Focus" : "⛶ Focus Mode"}
+          </button>
           <button className="secondary" onClick={openExternally}>Download</button>
           <button className="ghost" onClick={reprocess}>Reprocess</button>
         </div>
@@ -202,6 +283,8 @@ export function DocumentDetail() {
         <div className="side-panel" style={{ width: panelW }}>
           <CollapsibleSection
             title="AI Summary"
+            open={summarySectionOpen}
+            onOpenChange={setSummarySectionOpen}
             badge={<span className="pill">AI-generated</span>}
             actions={
               doc.summary && (
@@ -216,7 +299,21 @@ export function DocumentDetail() {
 
           <CollapsibleSection
             title="Extracted Data"
+            open={extractedOpen}
+            onOpenChange={setExtractedOpen}
             badge={pendingCount > 0 ? <span className="pill">{pendingCount} pending</span> : undefined}
+            actions={
+              pendingCount > 0 && (
+                <span className="row" style={{ gap: 6 }}>
+                  <button className="ghost approve" disabled={bulkBusy} onClick={() => bulkReview("accept")}>
+                    ✓ Accept All Remaining
+                  </button>
+                  <button className="ghost reject" disabled={bulkBusy} onClick={() => bulkReview("reject")}>
+                    ✕ Reject All Remaining
+                  </button>
+                </span>
+              )
+            }
           >
             {(doc.fields || []).length === 0 ? (
               <div className="muted">No fields extracted yet.</div>
@@ -227,11 +324,12 @@ export function DocumentDetail() {
                 reviewing={reviewing}
                 onJump={jumpToField}
                 onReview={reviewField}
+                onEdit={editField}
               />
             )}
           </CollapsibleSection>
 
-          <CollapsibleSection title="Classifications" defaultOpen={false}>
+          <CollapsibleSection title="Classifications" open={classificationsOpen} onOpenChange={setClassificationsOpen}>
             {(doc.classifications || []).length === 0 && <div className="muted">Not classified yet.</div>}
             {(doc.classifications || []).map((c: any, i: number) => (
               <div key={i} className="spread" style={{ padding: "4px 0" }}>
@@ -243,7 +341,8 @@ export function DocumentDetail() {
 
           <CollapsibleSection
             title="Processing Timeline"
-            defaultOpen={doc.processing_status === "processing"}
+            open={timelineOpen}
+            onOpenChange={setTimelineOverride}
             badge={
               pipeline?.run?.status === "running" ? <span className="pill">running</span> : undefined
             }

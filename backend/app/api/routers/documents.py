@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import client_ip, get_current_tenant, get_current_user, get_tenant_db, require_reviewer
@@ -29,6 +29,7 @@ from app.models.constants import (
     PERM_MANAGE,
     PERM_UPDATE,
     PIPELINE_STAGES,
+    RV_CORRECTED,
     RV_PENDING,
     RV_REJECTED,
     RV_VERIFIED,
@@ -38,8 +39,15 @@ from app.models.document import Document, DocumentVersion
 from app.models.mgmt import Tenant as MgmtTenant
 from app.models.review import ReviewItem
 from app.models.tenant import User
-from app.schemas import DocumentDetail, DocumentOut, ExtractionReview, PresignedUrl
-from app.services import audit, ingest_policy, mime, permissions
+from app.schemas import (
+    BulkExtractionReview,
+    DocumentDetail,
+    DocumentOut,
+    ExtractionEdit,
+    ExtractionReview,
+    PresignedUrl,
+)
+from app.services import audit, ingest_policy, mime, normalize, permissions
 from app.services.hashing import sha256_hex
 from app.storage import get_storage
 
@@ -55,7 +63,7 @@ def _field_dict(e: FieldValue) -> dict:
     return {
         "id": str(e.id), "field_key": e.field_key, "field_path": e.field_path,
         "field_name": e.field_name, "node_kind": e.node_kind, "data_type": e.data_type,
-        "ordinal": e.ordinal, "is_discovered": e.is_discovered,
+        "ordinal": e.ordinal, "is_discovered": e.is_discovered, "is_user_edited": e.is_user_edited,
         "raw_value": e.raw_value, "value_type": e.value_type, "value_text": e.value_text,
         "value_number": e.value_number,
         "value_date": e.value_date.isoformat() if e.value_date else None,
@@ -436,8 +444,24 @@ async def review_extraction(
         # Learning-loop feedstock: (input, prediction, correction).
         item.payload = {**(item.payload or {}), "action": body.action, "correction": None}
 
-    # Flip the document out of needs_review once nothing is pending.
-    # Flush first so the count sees this item's new status, not a stale one.
+    remaining = await _flip_doc_status_on_pending_change(db, doc)
+
+    await audit.log_event(
+        db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_REVIEW,
+        object_type="extraction", object_id=ext.id,
+        detail={"action": body.action, "field": ext.field_name, "inline": True}, commit=False)
+    await db.commit()
+    return {
+        "id": str(ext.id), "field_name": ext.field_name, "review_status": ext.review_status,
+        "document_status": doc.processing_status, "pending_remaining": remaining,
+    }
+
+
+async def _flip_doc_status_on_pending_change(db: AsyncSession, doc: Document) -> int:
+    """Recompute the document's remaining-pending count and flip
+    processing_status between needs_review/processed to match. Shared by
+    every endpoint that resolves one or more ReviewItems -- flush first so
+    the count sees this call's own status changes, not stale ones."""
     await db.flush()
     remaining = (await db.execute(
         select(func.count()).select_from(ReviewItem).where(
@@ -447,14 +471,107 @@ async def review_extraction(
         doc.processing_status = DOC_PROCESSED
     elif remaining and doc.processing_status not in (DOC_FAILED,):
         doc.processing_status = DOC_NEEDS_REVIEW
+    return remaining
+
+
+@router.post("/{document_id}/extractions/bulk-review")
+async def bulk_review_extractions(
+    document_id: str,
+    body: BulkExtractionReview,
+    user: User = Depends(require_reviewer),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Accept or reject every field still pending_review on this document's
+    current version in one action -- the "Accept/Reject All Remaining"
+    buttons. Same rules and side effects as `review_extraction`, applied in
+    bulk rather than once per field."""
+    if body.action not in ("accept", "reject"):
+        raise HTTPException(400, "action must be accept or reject")
+
+    doc = await db.get(Document, document_id)
+    if not doc or not await permissions.can_read(db, user, doc.id):
+        raise HTTPException(404, "Document not found")
+
+    new_status = RV_VERIFIED if body.action == "accept" else RV_REJECTED
+    pending_fields = (await db.execute(
+        select(FieldValue).where(
+            FieldValue.document_id == doc.id, FieldValue.document_version == doc.current_version,
+            FieldValue.node_kind == "scalar", FieldValue.review_status == RV_PENDING)
+    )).scalars().all()
+
+    if not pending_fields:
+        return {"count": 0, "review_status": new_status, "document_status": doc.processing_status,
+                "pending_remaining": 0}
+
+    field_ids = [f.id for f in pending_fields]
+    for f in pending_fields:
+        f.review_status = new_status
+
+    now = dt.datetime.now(dt.timezone.utc)
+    await db.execute(
+        update(ReviewItem).where(ReviewItem.field_value_id.in_(field_ids), ReviewItem.status == RV_PENDING)
+        .values(status=new_status, resolved_by=user.id, resolved_at=now))
+
+    remaining = await _flip_doc_status_on_pending_change(db, doc)
+
+    await audit.log_event(
+        db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_REVIEW,
+        object_type="document", object_id=doc.id,
+        detail={"action": body.action, "count": len(field_ids), "bulk": True}, commit=False)
+    await db.commit()
+    return {
+        "count": len(field_ids), "review_status": new_status,
+        "document_status": doc.processing_status, "pending_remaining": remaining,
+    }
+
+
+@router.post("/{document_id}/extractions/{field_value_id}/edit")
+async def edit_extraction(
+    document_id: str,
+    field_value_id: str,
+    body: ExtractionEdit,
+    user: User = Depends(require_reviewer),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Directly replace a field's value, regardless of its current review
+    status. Marks it corrected + user-edited -- is_user_edited stays true even
+    if review_status later changes again, as a durable record a human typed
+    this value rather than just accepting/rejecting the AI's raw_value."""
+    doc = await db.get(Document, document_id)
+    if not doc or not await permissions.can_read(db, user, doc.id):
+        raise HTTPException(404, "Document not found")
+    ext = await db.get(FieldValue, field_value_id)
+    if not ext or str(ext.document_id) != str(doc.id):
+        raise HTTPException(404, "FieldValue not found")
+    if ext.node_kind != "scalar":
+        raise HTTPException(400, "Only scalar fields have a value to edit")
+
+    ext.raw_value = body.value
+    norm = normalize.normalize(body.value, ext.value_type)
+    ext.value_text, ext.value_number = norm.value_text, norm.value_number
+    ext.value_date, ext.value_currency = norm.value_date, norm.value_currency
+    ext.review_status = RV_CORRECTED
+    ext.is_user_edited = True
+
+    item = (await db.execute(
+        select(ReviewItem).where(ReviewItem.field_value_id == ext.id, ReviewItem.status == RV_PENDING)
+    )).scalars().first()
+    if item:
+        item.status = RV_CORRECTED
+        item.resolved_by = user.id
+        item.resolved_at = dt.datetime.now(dt.timezone.utc)
+        item.payload = {**(item.payload or {}), "action": "edit", "correction": body.value}
+
+    remaining = await _flip_doc_status_on_pending_change(db, doc)
 
     await audit.log_event(
         db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_REVIEW,
         object_type="extraction", object_id=ext.id,
-        detail={"action": body.action, "field": ext.field_name, "inline": True}, commit=False)
+        detail={"action": "edit", "field": ext.field_name}, commit=False)
     await db.commit()
     return {
         "id": str(ext.id), "field_name": ext.field_name, "review_status": ext.review_status,
+        "raw_value": ext.raw_value, "is_user_edited": ext.is_user_edited,
         "document_status": doc.processing_status, "pending_remaining": remaining,
     }
 
