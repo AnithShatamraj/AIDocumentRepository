@@ -28,12 +28,15 @@ interface Props {
   onJump: (n: FieldNode) => void;
   onReview: (id: string, action: "accept" | "reject") => void;
   onEdit: (id: string, value: string) => void;
+  /** Remove one item from a list/table field. Only offered on direct
+   * children of a `list` container -- see ContainerField. */
+  onDelete: (id: string) => void;
 }
 
 /** Recursive renderer: scalars are rows, objects are indented groups, lists are
  * numbered item cards. Every leaf keeps click-to-highlight, accept/reject (status
  * permitting), and manual edit at any depth. */
-export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview, onEdit }: Props) {
+export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview, onEdit, onDelete }: Props) {
   return (
     <>
       {nodes.map((n) =>
@@ -58,6 +61,7 @@ export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview
             onJump={onJump}
             onReview={onReview}
             onEdit={onEdit}
+            onDelete={onDelete}
           />
         )
       )}
@@ -66,11 +70,15 @@ export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview
 }
 
 function ScalarField({
-  node, depth, isPdf, busy, onJump, onReview, onEdit,
+  node, depth, isPdf, busy, onJump, onReview, onEdit, onDelete,
 }: {
   node: FieldNode; depth: number; isPdf: boolean; busy: boolean;
   onJump: (n: FieldNode) => void; onReview: (id: string, a: "accept" | "reject") => void;
   onEdit: (id: string, value: string) => void;
+  /** Only set when this node is itself a direct item of a `list` field of
+   * scalars (as opposed to a regular schema field) -- shows a Delete button
+   * alongside Edit. */
+  onDelete?: (id: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(node.raw_value || "");
@@ -152,6 +160,11 @@ function ScalarField({
                 </button>
               )}
               <button className="ghost" disabled={busy} onClick={startEdit}>✎ Edit</button>
+              {onDelete && (
+                <button className="ghost reject" disabled={busy} title="Delete this item" onClick={() => onDelete(node.id)}>
+                  🗑
+                </button>
+              )}
             </>
           )}
         </span>
@@ -161,11 +174,11 @@ function ScalarField({
 }
 
 function ContainerField({
-  node, depth, isPdf, reviewing, onJump, onReview, onEdit,
+  node, depth, isPdf, reviewing, onJump, onReview, onEdit, onDelete,
 }: {
   node: FieldNode; depth: number; isPdf: boolean; reviewing: Record<string, boolean>;
   onJump: (n: FieldNode) => void; onReview: (id: string, a: "accept" | "reject") => void;
-  onEdit: (id: string, value: string) => void;
+  onEdit: (id: string, value: string) => void; onDelete: (id: string) => void;
 }) {
   const [open, setOpen] = useState(true);
   const [asTable, setAsTable] = useState(false);
@@ -211,6 +224,7 @@ function ContainerField({
               <tr>
                 <th>#</th>
                 {columns.map((c) => <th key={c.key}>{c.name}</th>)}
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -229,6 +243,16 @@ function ContainerField({
                       </td>
                     );
                   })}
+                  <td>
+                    <button
+                      className="ghost reject"
+                      style={{ padding: "2px 8px", fontSize: 11 }}
+                      title="Delete this row"
+                      onClick={() => onDelete(item.id)}
+                    >
+                      🗑
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -244,6 +268,14 @@ function ContainerField({
                   <div className="list-item-head">
                     <span className="idx">#{i + 1}</span>
                     <span className="muted">{headline(item)}</span>
+                    <button
+                      className="ghost reject"
+                      style={{ marginLeft: "auto", padding: "2px 8px", fontSize: 11 }}
+                      title="Delete this item"
+                      onClick={() => onDelete(item.id)}
+                    >
+                      🗑 Delete
+                    </button>
                   </div>
                   <FieldTree
                     nodes={item.children}
@@ -253,8 +285,23 @@ function ContainerField({
                     onJump={onJump}
                     onReview={onReview}
                     onEdit={onEdit}
+                    onDelete={onDelete}
                   />
                 </div>
+              ))
+            : isList
+            ? node.children.map((item) => (
+                <ScalarField
+                  key={item.id}
+                  node={item}
+                  depth={depth + 1}
+                  isPdf={isPdf}
+                  busy={!!reviewing[item.id]}
+                  onJump={onJump}
+                  onReview={onReview}
+                  onEdit={onEdit}
+                  onDelete={onDelete}
+                />
               ))
             : (
               <FieldTree
@@ -265,6 +312,7 @@ function ContainerField({
                 onJump={onJump}
                 onReview={onReview}
                 onEdit={onEdit}
+                onDelete={onDelete}
               />
             )}
         </div>

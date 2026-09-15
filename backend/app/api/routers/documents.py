@@ -189,16 +189,17 @@ def _trigger_pipeline(document_id, tenant_id, from_stage=None):
     start_processing.delay(str(document_id), str(tenant_id), from_stage, str(uuid.uuid4()))
 
 
-@router.get("/name-available")
+@router.get("/name-available", summary="Check whether a document name is free")
 async def name_available(name: str = Query(...), user: User = Depends(get_current_user),
                          db: AsyncSession = Depends(get_tenant_db)):
-    """Live check for the upload dialog."""
+    """Live check for the upload dialog -- names must be unique per tenant.
+    Returns a suggested alternative when taken."""
     taken = await ingest_policy.name_taken(db, user.tenant_id, name)
     return {"name": name, "available": not taken,
             "suggestion": (await ingest_policy.suggest_name(db, user.tenant_id, name)) if taken else None}
 
 
-@router.post("", response_model=dict, status_code=201)
+@router.post("", response_model=dict, status_code=201, summary="Upload a document")
 async def upload(
     request: Request,
     file: UploadFile = File(...),
@@ -209,6 +210,13 @@ async def upload(
     tenant: MgmtTenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_tenant_db),
 ):
+    """`multipart/form-data` upload. Triggers the async AI pipeline (text
+    extraction -> classification -> summarization -> metadata extraction ->
+    chunking -> embedding) automatically unless the file is a byte-identical
+    duplicate of one already processed, in which case its results are reused
+    (`action: "cloned"`) or access is simply granted (`action: "linked_existing"`)
+    instead of paying to redo the work. Poll `GET /{document_id}/pipeline` or
+    subscribe to `GET /{document_id}/events` (SSE) for progress."""
     data = await file.read()
     type_id = None
     if document_type_id and document_type_id != "auto":
@@ -237,7 +245,7 @@ async def upload(
     return {"document": DocumentOut.model_validate(doc).model_dump(), **meta}
 
 
-@router.post("/bulk", response_model=dict, status_code=201)
+@router.post("/bulk", response_model=dict, status_code=201, summary="Upload multiple documents at once")
 async def bulk_upload(
     request: Request,
     files: list[UploadFile] = File(...),
@@ -245,6 +253,10 @@ async def bulk_upload(
     tenant: MgmtTenant = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_tenant_db),
 ):
+    """Same per-file rules as `POST /documents`, applied independently to each
+    file -- one rejected or renamed file doesn't stop the others. A name clash
+    is auto-resolved with a suggested name rather than rejected, since this
+    is a batch flow with no per-file confirmation step."""
     results = []
     for f in files:
         data = await f.read()
@@ -274,13 +286,16 @@ async def bulk_upload(
     return {"results": results}
 
 
-@router.get("", response_model=list[DocumentOut])
+@router.get("", response_model=list[DocumentOut], summary="List documents")
 async def list_documents(
     q: str | None = Query(default=None),
     status_filter: str | None = Query(default=None, alias="status"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
+    """Only documents the caller can read (owned, individually shared, or
+    shared via a group) -- optionally filtered by name substring (`q`) and/or
+    `processing_status`. Sorted newest first, capped at 200."""
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
     stmt = select(Document).where(cond)
@@ -293,8 +308,12 @@ async def list_documents(
     return [DocumentOut.model_validate(d) for d in rows.scalars().all()]
 
 
-@router.get("/{document_id}", response_model=DocumentDetail)
+@router.get("/{document_id}", response_model=DocumentDetail, summary="Get a document's full detail")
 async def get_document(document_id: str, request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """The single call the document review page is built on: summary,
+    classifications, and the full extracted-data field tree (`fields`, plus a
+    flat `extractions` alias of just the scalar leaves) for the document's
+    current version, in one response."""
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
         raise HTTPException(404, "Document not found")
@@ -326,11 +345,15 @@ async def get_document(document_id: str, request: Request, user: User = Depends(
     return detail
 
 
-@router.get("/{document_id}/download", response_model=PresignedUrl)
+@router.get("/{document_id}/download", response_model=PresignedUrl, summary="Get a presigned download URL")
 async def download(document_id: str, request: Request, version: int | None = Query(default=None),
                    disposition: str = Query(default="attachment"),
                    user: User = Depends(get_current_user), tenant: MgmtTenant = Depends(get_current_tenant),
                    db: AsyncSession = Depends(get_tenant_db)):
+    """Returns a short-lived (15 min) presigned URL to the file in the
+    tenant's storage container -- the API itself never proxies the bytes.
+    `disposition=inline` omits Content-Disposition so a browser can render it
+    (e.g. the PDF viewer) instead of downloading it."""
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
         raise HTTPException(404, "Document not found")
@@ -374,7 +397,7 @@ def _render_page_png(data: bytes, page_no: int, scale: float) -> bytes:
         pdf.close()
 
 
-@router.get("/{document_id}/pages/{page_no}/image")
+@router.get("/{document_id}/pages/{page_no}/image", summary="Render one PDF page as a PNG")
 async def page_image(document_id: str, page_no: int, version: int | None = Query(default=None),
                      scale: float = Query(default=2.0, ge=0.5, le=4.0),
                      user: User = Depends(get_current_user), tenant: MgmtTenant = Depends(get_current_tenant),
@@ -406,7 +429,7 @@ async def page_image(document_id: str, page_no: int, version: int | None = Query
                     headers={"Cache-Control": "private, max-age=3600"})
 
 
-@router.post("/{document_id}/extractions/{field_value_id}/review")
+@router.post("/{document_id}/extractions/{field_value_id}/review", summary="Accept or reject one extracted field")
 async def review_extraction(
     document_id: str,
     field_value_id: str,
@@ -474,7 +497,7 @@ async def _flip_doc_status_on_pending_change(db: AsyncSession, doc: Document) ->
     return remaining
 
 
-@router.post("/{document_id}/extractions/bulk-review")
+@router.post("/{document_id}/extractions/bulk-review", summary="Accept or reject every pending field at once")
 async def bulk_review_extractions(
     document_id: str,
     body: BulkExtractionReview,
@@ -525,7 +548,7 @@ async def bulk_review_extractions(
     }
 
 
-@router.post("/{document_id}/extractions/{field_value_id}/edit")
+@router.post("/{document_id}/extractions/{field_value_id}/edit", summary="Directly correct a field's value")
 async def edit_extraction(
     document_id: str,
     field_value_id: str,
@@ -576,7 +599,44 @@ async def edit_extraction(
     }
 
 
-@router.get("/{document_id}/layout")
+@router.delete("/{document_id}/extractions/{field_value_id}", summary="Delete a row from a list/table field")
+async def delete_extraction_item(
+    document_id: str,
+    field_value_id: str,
+    user: User = Depends(require_reviewer),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Remove one row from a list/table field (e.g. a duplicated or spurious
+    entry the AI extracted). Only items that live under a `list` container can
+    be deleted this way -- schema-defined fields can be corrected via `edit`
+    but not removed. Postgres ON DELETE CASCADE on field_values.parent_id and
+    review_items.field_value_id takes care of the item's descendants and any
+    pending review items for them in the same statement.
+    """
+    doc = await db.get(Document, document_id)
+    if not doc or not await permissions.can_read(db, user, doc.id):
+        raise HTTPException(404, "Document not found")
+    ext = await db.get(FieldValue, field_value_id)
+    if not ext or str(ext.document_id) != str(doc.id):
+        raise HTTPException(404, "FieldValue not found")
+
+    parent = await db.get(FieldValue, ext.parent_id) if ext.parent_id else None
+    if not parent or parent.node_kind != "list":
+        raise HTTPException(400, "Only items inside a list/table field can be deleted")
+
+    field_name, field_path, parent_id = ext.field_name, ext.field_path, parent.id
+    await db.delete(ext)
+    remaining = await _flip_doc_status_on_pending_change(db, doc)
+
+    await audit.log_event(
+        db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_DELETE,
+        object_type="extraction", object_id=field_value_id,
+        detail={"field": field_name, "field_path": field_path, "parent_id": str(parent_id)}, commit=False)
+    await db.commit()
+    return {"id": field_value_id, "document_status": doc.processing_status, "pending_remaining": remaining}
+
+
+@router.get("/{document_id}/layout", summary="Get per-page layout for viewer overlays")
 async def layout(document_id: str, version: int | None = Query(default=None),
                  include_blocks: bool = Query(default=False),
                  user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
@@ -602,7 +662,7 @@ async def layout(document_id: str, version: int | None = Query(default=None),
             "parser": u.get("parser"), "ocr_used": u.get("ocr_used"), "pages": pages}
 
 
-@router.get("/{document_id}/versions")
+@router.get("/{document_id}/versions", summary="List a document's version history")
 async def list_versions(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
@@ -615,11 +675,14 @@ async def list_versions(document_id: str, user: User = Depends(get_current_user)
             for v in rows]
 
 
-@router.post("/{document_id}/versions", response_model=DocumentOut, status_code=201)
+@router.post("/{document_id}/versions", response_model=DocumentOut, status_code=201, summary="Upload a new version of a document")
 async def upload_new_version(document_id: str, file: UploadFile = File(...),
                              user: User = Depends(get_current_user),
                              tenant: MgmtTenant = Depends(get_current_tenant),
                              db: AsyncSession = Depends(get_tenant_db)):
+    """Replaces the document's `current_version` with a new file and re-runs
+    the full pipeline from scratch -- requires Update permission (owner,
+    admin, or an explicit grant), not just Read."""
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.has_permission(db, user, doc.id, PERM_UPDATE):
         raise HTTPException(404, "Document not found or no update permission")
@@ -641,10 +704,15 @@ async def upload_new_version(document_id: str, file: UploadFile = File(...),
     return DocumentOut.model_validate(doc)
 
 
-@router.post("/{document_id}/reprocess", response_model=dict)
+@router.post("/{document_id}/reprocess", response_model=dict, summary="Re-run the AI pipeline")
 async def reprocess(document_id: str, from_stage: str | None = Query(default=None),
                     user: User = Depends(get_current_user), tenant: MgmtTenant = Depends(get_current_tenant),
                     db: AsyncSession = Depends(get_tenant_db)):
+    """Re-queues the pipeline for the document's current version. Omit
+    `from_stage` to run it end-to-end, or pass one of the pipeline stage
+    names (see `GET /{document_id}/pipeline`) to resume partway through --
+    e.g. after fixing a document type's schema and wanting fresh extraction
+    without re-paying for text extraction/classification/summarization."""
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.has_permission(db, user, doc.id, PERM_UPDATE):
         raise HTTPException(404, "Document not found or no update permission")
@@ -654,8 +722,11 @@ async def reprocess(document_id: str, from_stage: str | None = Query(default=Non
     return {"status": "queued", "document_id": str(doc.id), "from_stage": from_stage}
 
 
-@router.delete("/{document_id}", status_code=204)
+@router.delete("/{document_id}", status_code=204, summary="Soft-delete a document")
 async def soft_delete(document_id: str, request: Request, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """Marks the document `is_deleted` rather than removing it -- recoverable
+    via `POST /{document_id}/restore` within the retention window
+    (currently 30 days), after which it's treated as permanently gone."""
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.has_permission(db, user, doc.id, PERM_DELETE):
         raise HTTPException(404, "Document not found or no delete permission")
@@ -666,8 +737,10 @@ async def soft_delete(document_id: str, request: Request, user: User = Depends(g
     await db.commit()
 
 
-@router.post("/{document_id}/restore", response_model=DocumentOut)
+@router.post("/{document_id}/restore", response_model=DocumentOut, summary="Restore a soft-deleted document")
 async def restore(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """Requires being an administrator, the document's owner, or holding
+    Manage permission on it. 410 once the retention window has elapsed."""
     doc = await db.get(Document, document_id)
     if not doc or doc.tenant_id != user.tenant_id:
         raise HTTPException(404, "Document not found")

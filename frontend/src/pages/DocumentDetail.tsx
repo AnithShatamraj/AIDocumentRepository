@@ -215,6 +215,21 @@ export function DocumentDetail() {
     }
   }
 
+  async function deleteItem(extractionId: string) {
+    if (!window.confirm("Delete this item? This cannot be undone.")) return;
+    setReviewing((r) => ({ ...r, [extractionId]: true }));
+    try {
+      await api.del(`/api/documents/${id}/extractions/${extractionId}`);
+      await refreshAfterReview();
+    } finally {
+      setReviewing((r) => {
+        const next = { ...r };
+        delete next[extractionId];
+        return next;
+      });
+    }
+  }
+
   if (!doc) return <div className="muted">Loading…</div>;
 
   const extraction = pipeline?.stages?.find((s: any) => s.name === "text_extraction");
@@ -325,6 +340,7 @@ export function DocumentDetail() {
                 onJump={jumpToField}
                 onReview={reviewField}
                 onEdit={editField}
+                onDelete={deleteItem}
               />
             )}
           </CollapsibleSection>
