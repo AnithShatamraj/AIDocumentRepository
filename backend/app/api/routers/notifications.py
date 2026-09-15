@@ -12,8 +12,10 @@ from app.models.tenant import User
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 
-@router.get("")
+@router.get("", summary="List the caller's notifications")
 async def list_notifications(unread_only: bool = False, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """Newest first, capped at 100; `unread` is the total unread count
+    regardless of the 100-row cap or the `unread_only` filter."""
     stmt = select(Notification).where(Notification.user_id == user.id)
     if unread_only:
         stmt = stmt.where(Notification.is_read.is_(False))
@@ -26,7 +28,7 @@ async def list_notifications(unread_only: bool = False, user: User = Depends(get
                                          "link": n.link, "is_read": n.is_read, "created_at": n.created_at.isoformat()} for n in rows]}
 
 
-@router.post("/{notification_id}/read")
+@router.post("/{notification_id}/read", summary="Mark one notification read")
 async def mark_read(notification_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     n = await db.get(Notification, notification_id)
     if not n or n.user_id != user.id:
@@ -36,7 +38,7 @@ async def mark_read(notification_id: str, user: User = Depends(get_current_user)
     return {"status": "ok"}
 
 
-@router.post("/read-all")
+@router.post("/read-all", summary="Mark all of the caller's notifications read")
 async def mark_all_read(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     rows = (await db.execute(select(Notification).where(Notification.user_id == user.id, Notification.is_read.is_(False)))).scalars().all()
     for n in rows:

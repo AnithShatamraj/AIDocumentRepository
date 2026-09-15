@@ -24,8 +24,11 @@ def _now():
     return dt.datetime.now(dt.timezone.utc)
 
 
-@router.get("")
+@router.get("", summary="Get dashboard widget data")
 async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """Aggregated over documents the caller can read: totals by status/type,
+    pending-review count + oldest age, the 5 most recent uploads, the 7d/30d
+    auto-accept rate, and period-to-date AI cost."""
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
 

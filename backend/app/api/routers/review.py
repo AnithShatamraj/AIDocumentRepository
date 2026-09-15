@@ -43,7 +43,7 @@ async def _readable_item(db, user, review_id) -> ReviewItem:
     return item
 
 
-@router.get("", response_model=list[ReviewOut])
+@router.get("", response_model=list[ReviewOut], summary="List pending review items across all documents")
 async def list_queue(
     document_type_id: str | None = Query(default=None),
     field_name: str | None = Query(default=None),
@@ -52,6 +52,11 @@ async def list_queue(
     user: User = Depends(require_reviewer),
     db: AsyncSession = Depends(get_tenant_db),
 ):
+    """The cross-document queue view (as opposed to reviewing one document's
+    fields inline via `/documents/{id}/extractions/...`) -- every low-
+    confidence extraction or classification awaiting a human decision,
+    filterable and sorted oldest-first or lowest-confidence-first. Capped at
+    200 rows."""
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
     stmt = (select(ReviewItem)
@@ -69,8 +74,11 @@ async def list_queue(
     return [ReviewOut.model_validate(r) for r in rows]
 
 
-@router.post("/{review_id}/claim", response_model=ReviewOut)
+@router.post("/{review_id}/claim", response_model=ReviewOut, summary="Claim a review item")
 async def claim(review_id: str, user: User = Depends(require_reviewer), db: AsyncSession = Depends(get_tenant_db)):
+    """Optimistic lock so two reviewers don't work the same item -- claims
+    auto-expire after 30 minutes if not resolved, and 409s if someone else
+    holds an unexpired claim."""
     item = await _readable_item(db, user, review_id)
     # Release stale claims first.
     if item.claimed_by and item.claimed_at and (_now() - item.claimed_at).total_seconds() > CLAIM_TIMEOUT_MIN * 60:
@@ -83,8 +91,13 @@ async def claim(review_id: str, user: User = Depends(require_reviewer), db: Asyn
     return ReviewOut.model_validate(item)
 
 
-@router.post("/{review_id}/resolve", response_model=ReviewOut)
+@router.post("/{review_id}/resolve", response_model=ReviewOut, summary="Resolve a review item")
 async def resolve(review_id: str, body: ReviewResolve, user: User = Depends(require_reviewer), db: AsyncSession = Depends(get_tenant_db)):
+    """`action` is `accept`, `reject`, or (extraction items only) `modify`
+    with a `corrected_value`. For a classification item, `accept`/`modify`
+    require `document_type_ids` and re-triggers metadata extraction now that
+    the document is categorized. 409 if already resolved or claimed by
+    someone else."""
     item = await _readable_item(db, user, review_id)
     if item.claimed_by and item.claimed_by != user.id:
         raise HTTPException(409, "Item claimed by another reviewer")

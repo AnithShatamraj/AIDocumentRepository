@@ -33,8 +33,11 @@ async def _latest_run(db, document_id):
     )).scalars().first()
 
 
-@router.get("/pipeline")
+@router.get("/pipeline", summary="Get the latest pipeline run's status")
 async def pipeline_status(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """One-shot snapshot of the most recent run (per-stage status, latency,
+    cost, tokens). For live updates as the pipeline progresses, use the
+    `/events` SSE endpoint below instead of polling this."""
     doc = await db.get(Document, document_id)
     if not doc or not await permissions.can_read(db, user, doc.id):
         raise HTTPException(404, "Document not found")
@@ -56,8 +59,15 @@ async def pipeline_status(document_id: str, user: User = Depends(get_current_use
     }
 
 
-@router.get("/events")
+@router.get("/events", summary="Live pipeline progress (Server-Sent Events)")
 async def pipeline_events(document_id: str, token: str = Query(...), mgmt_db: AsyncSession = Depends(get_mgmt_db)):
+    """**Not header-authenticated like every other endpoint** -- the browser's
+    `EventSource` API can't set an `Authorization` header, so the same JWT
+    from `POST /auth/login` is passed as a `?token=` query parameter instead.
+    Streams `stage` events (one per pipeline stage transition) plus periodic
+    `ping` keepalives; reconnects automatically after ~15 min (`reconnect`
+    event) since the stream has a bounded server-side lifetime.
+    """
     # EventSource can't set headers, so auth is via query token -- meaning
     # this endpoint can't use the get_current_tenant/get_tenant_db dependency
     # chain (that reads the Authorization header). Resolve the tenant by hand
