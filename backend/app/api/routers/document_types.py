@@ -16,35 +16,16 @@ from app.models.catalog import DocumentType, TypeSchema
 from app.models.document import document_type_links
 from app.models.tenant import User
 from app.schemas import DocumentTypeCreate, DocumentTypeOut, DocumentTypeUpdate
+from app.services.type_catalog import NameTaken, create_document_type
 from app.services.fields import (
     SchemaError,
     compile_json_schema,
     dump_schema,
-    slugify_key,
+    ensure_keys as _ensure_keys,
     validate_schema,
 )
 
 router = APIRouter(prefix="/document-types", tags=["document-types"])
-
-
-def _ensure_keys(nodes: list[dict]) -> list[dict]:
-    """Let the UI omit `key` — derive a stable one from the name, recursively."""
-    out = []
-    for n in nodes or []:
-        n = dict(n)
-        if not n.get("key"):
-            n["key"] = slugify_key(n.get("name", ""))
-        if n.get("fields"):
-            n["fields"] = _ensure_keys(n["fields"])
-        if n.get("item"):
-            item = dict(n["item"])
-            if not item.get("key"):
-                item["key"] = slugify_key(item.get("name") or f"{n['key']}_item")
-            if item.get("fields"):
-                item["fields"] = _ensure_keys(item["fields"])
-            n["item"] = item
-        out.append(n)
-    return out
 
 
 def _validated(fields: list[dict]) -> list[dict]:
@@ -114,22 +95,13 @@ async def create_type(body: DocumentTypeCreate, admin: User = Depends(require_ad
                       db: AsyncSession = Depends(get_tenant_db)):
     """Create a document type with an optional initial field schema (scalars,
     objects, and lists of either). 409 if the name is already taken."""
-    exists = (await db.execute(
-        select(DocumentType).where(DocumentType.tenant_id == admin.tenant_id,
-                                   func.lower(DocumentType.name) == body.name.strip().lower())
-    )).scalars().first()
-    if exists:
+    fields = _validated(body.fields) if body.fields else None
+    try:
+        dt = await create_document_type(
+            db, tenant_id=admin.tenant_id, created_by=admin.id,
+            name=body.name, description=body.description, fields=fields)
+    except NameTaken:
         raise HTTPException(409, f"A document type named '{body.name}' already exists")
-
-    dt = DocumentType(tenant_id=admin.tenant_id, name=body.name.strip(), description=body.description)
-    db.add(dt)
-    await db.flush()
-    if body.fields:
-        schema = TypeSchema(tenant_id=admin.tenant_id, document_type_id=dt.id, version=1,
-                            fields=_validated(body.fields), created_by=admin.id)
-        db.add(schema)
-        await db.flush()
-        dt.active_schema_id = schema.id
     await db.commit()
     await db.refresh(dt)
     return DocumentTypeOut.model_validate(dt)

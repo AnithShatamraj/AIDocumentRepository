@@ -20,6 +20,8 @@ TAGS_METADATA = [
     {"name": "auth", "description": "Login and session identity."},
     {"name": "users", "description": "User and group management (tenant administrators)."},
     {"name": "document-types", "description": "Document type definitions and versioned field schemas."},
+    {"name": "document-type-drafts",
+     "description": "AI-assisted document type authoring: a guided, resumable chat that ends in a published type."},
     {"name": "documents", "description": "Upload, retrieval, versioning, extracted-data review, and lifecycle."},
     {"name": "permissions", "description": "Per-document sharing -- grant/revoke access."},
     {"name": "pipeline", "description": "Processing pipeline status and live progress (Server-Sent Events)."},
