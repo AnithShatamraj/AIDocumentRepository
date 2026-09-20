@@ -61,6 +61,13 @@ async def get_current_tenant(
     tenant = await mgmt_db.get(MgmtTenant, uuid.UUID(tenant_id))
     if tenant is None or not tenant.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unknown or inactive tenant")
+    # This object outlives the request, so it must not stay attached to the
+    # request's session: get_mgmt_db rolls that session back whenever the
+    # endpoint raises (any 4xx), and rollback() expires everything attached to
+    # it -- leaving the cached copy expired *and* detached, so every request for
+    # the next TTL would die with DetachedInstanceError. Detached with its
+    # attributes loaded is exactly what a cached value should be.
+    mgmt_db.expunge(tenant)
     _tenant_cache[tenant_id] = (time.monotonic() + _TENANT_CACHE_TTL_SECONDS, tenant)
     return tenant
 

@@ -5,6 +5,7 @@ from app.api.routers import (
     admin,
     audit,
     auth,
+    document_type_drafts,
     document_types,
     chat,
     dashboard,
@@ -21,6 +22,7 @@ api_router = APIRouter(prefix="/api")
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(document_types.router)
+api_router.include_router(document_type_drafts.router)
 api_router.include_router(documents.router)
 api_router.include_router(permissions.router)
 api_router.include_router(pipeline.router)

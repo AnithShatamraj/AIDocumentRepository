@@ -24,8 +24,14 @@ async function handle(res: Response) {
     }
     throw new Error(typeof detail === "string" ? detail : "Request failed");
   }
+  // 204 No Content (our DELETE endpoints) comes back with a JSON content-type
+  // but an empty body, and res.json() throws on that -- after the request
+  // already succeeded.
+  if (res.status === 204 || res.status === 205) return null;
   const ct = res.headers.get("content-type") || "";
-  return ct.includes("application/json") ? res.json() : res.text();
+  if (!ct.includes("application/json")) return res.text();
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 function authHeaders(): Record<string, string> {

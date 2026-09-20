@@ -78,6 +78,27 @@ class DocumentTypeUpdate(BaseModel):
     fields: list[dict] | None = None
 
 
+# --------------------------------------------------- AI-assisted type drafts
+class DraftUpdate(BaseModel):
+    """Autosave of the editor panel. Any key left out is unchanged; `fields`
+    is stored as sent (not validated) -- a half-edited tree is a normal state."""
+    name: str | None = None
+    description: str | None = None
+    fields: list[dict] | None = None
+
+
+class DraftMessageIn(BaseModel):
+    """One admin turn: free text (`content`), or a button `action`.
+    `label` overrides the text shown as the admin's chat bubble for an action."""
+    content: str | None = None
+    action: str | None = None
+    label: str | None = None
+
+
+class DraftValidateIn(BaseModel):
+    sample_id: str | None = None  # omit to test every ready sample
+
+
 # ------------------------------------------------------------------- documents
 class DocumentOut(BaseModel):
     id: uuid.UUID

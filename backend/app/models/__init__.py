@@ -18,6 +18,11 @@ from app.models.content import (  # noqa: F401
     Summary,
 )
 from app.models.review import ReviewItem  # noqa: F401
+from app.models.type_draft import (  # noqa: F401
+    DocumentTypeDraft,
+    DocumentTypeDraftMessage,
+    DocumentTypeDraftSample,
+)
 from app.models.chat import Conversation, Message, QAAuditLog  # noqa: F401
 from app.models.ops import (  # noqa: F401
     AIConfig,
@@ -46,6 +51,9 @@ __all__ = [
     "Classification",
     "FieldValue",
     "ReviewItem",
+    "DocumentTypeDraft",
+    "DocumentTypeDraftMessage",
+    "DocumentTypeDraftSample",
     "Conversation",
     "Message",
     "QAAuditLog",

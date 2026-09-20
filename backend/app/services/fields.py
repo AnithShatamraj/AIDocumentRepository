@@ -48,6 +48,27 @@ def slugify_key(name: str) -> str:
     return key[:63]
 
 
+def ensure_keys(nodes: list[dict]) -> list[dict]:
+    """Let authors (the builder UI, the AI) omit `key` -- derive a stable one
+    from the name, recursively."""
+    out = []
+    for n in nodes or []:
+        n = dict(n)
+        if not n.get("key"):
+            n["key"] = slugify_key(n.get("name", ""))
+        if n.get("fields"):
+            n["fields"] = ensure_keys(n["fields"])
+        if n.get("item"):
+            item = dict(n["item"])
+            if not item.get("key"):
+                item["key"] = slugify_key(item.get("name") or f"{n['key']}_item")
+            if item.get("fields"):
+                item["fields"] = ensure_keys(item["fields"])
+            n["item"] = item
+        out.append(n)
+    return out
+
+
 class FieldDef(BaseModel):
     """One node of a document type's field tree."""
 

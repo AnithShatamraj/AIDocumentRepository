@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     llm_extract_model: str = "gpt-4o-mini"
     llm_summarize_model: str = "gpt-4o-mini"
     llm_chat_model: str = "gpt-4o-mini"
+    # AI-assisted document-type builder (description/name/field design). Schema
+    # design benefits from a stronger model than bulk extraction does; empty
+    # falls back to `llm_model`.
+    llm_builder_model: str = ""
 
     embedding_provider: Literal["openai", "azure_openai", "stub"] = "openai"
     embedding_model: str = "text-embedding-3-small"

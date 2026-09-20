@@ -9,6 +9,7 @@ import { Search } from "./pages/Search";
 import { Research } from "./pages/Research";
 import { Review } from "./pages/Review";
 import { DocumentTypes } from "./pages/DocumentTypes";
+import { DocumentTypeBuilder } from "./pages/DocumentTypeBuilder";
 import { Admin } from "./pages/Admin";
 
 export function App() {
@@ -34,6 +35,7 @@ export function App() {
         <Route path="/research" element={<Research />} />
         <Route path="/review" element={<Review />} />
         <Route path="/document-types" element={<DocumentTypes />} />
+        <Route path="/document-types/drafts/:id" element={<DocumentTypeBuilder />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
