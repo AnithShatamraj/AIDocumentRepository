@@ -18,8 +18,15 @@ from app.services import audit
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, summary="Log in and obtain a bearer token")
 async def login(body: LoginRequest, request: Request, mgmt_db: AsyncSession = Depends(get_mgmt_db)):
+    """Exchange a tenant slug + email + password for a JWT access token.
+
+    Every other endpoint in this API (except this one and `/health`) requires
+    that token on an `Authorization: Bearer <token>` header -- the token
+    itself embeds the user id, tenant id, tenant slug, and role, so no
+    further per-request DB lookup is needed to resolve the tenant.
+    """
     # Resolve which tenant database to even look in BEFORE touching one --
     # this is what fixes the old ordering bug where a DB session opened
     # before tenant identity was known.
@@ -46,6 +53,8 @@ async def login(body: LoginRequest, request: Request, mgmt_db: AsyncSession = De
         return TokenResponse(access_token=token, user=UserOut.model_validate(user))
 
 
-@router.get("/me", response_model=UserOut)
+@router.get("/me", response_model=UserOut, summary="Get the current user")
 async def me(user: User = Depends(get_current_user)):
+    """Return the profile of whoever the bearer token belongs to -- handy for
+    verifying a token is valid and seeing what it resolves to."""
     return UserOut.model_validate(user)

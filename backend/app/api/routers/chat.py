@@ -20,7 +20,7 @@ from app.services import chat
 router = APIRouter(tags=["chat"])
 
 
-@router.get("/conversations")
+@router.get("/conversations", summary="List the caller's chat conversations")
 async def list_conversations(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     rows = (await db.execute(
         select(Conversation).where(Conversation.user_id == user.id).order_by(Conversation.updated_at.desc())
@@ -28,7 +28,7 @@ async def list_conversations(user: User = Depends(get_current_user), db: AsyncSe
     return [{"id": str(c.id), "title": c.title, "updated_at": c.updated_at.isoformat()} for c in rows]
 
 
-@router.get("/conversations/{conversation_id}")
+@router.get("/conversations/{conversation_id}", summary="Get one conversation's message history")
 async def get_conversation(conversation_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     conv = await db.get(Conversation, conversation_id)
     if not conv or conv.user_id != user.id:
@@ -40,10 +40,14 @@ async def get_conversation(conversation_id: str, user: User = Depends(get_curren
             "messages": [{"role": m.role, "content": m.content, "citations": m.citations} for m in msgs]}
 
 
-@router.post("/chat")
+@router.post("/chat", summary="Ask a question, get a streamed grounded answer (SSE)")
 async def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
                       tenant: MgmtTenant = Depends(get_current_tenant),
                       db: AsyncSession = Depends(get_tenant_db)):
+    """Retrieval-augmented chat over the caller's readable documents. Omit
+    `conversation_id` to start a new conversation, or pass an existing one to
+    continue it. The response is `text/event-stream`: a `start` event with
+    the conversation id, then streamed answer tokens with citations."""
     # Resolve or create the conversation up front (owned by caller).
     if body.conversation_id:
         conv = await db.get(Conversation, body.conversation_id)

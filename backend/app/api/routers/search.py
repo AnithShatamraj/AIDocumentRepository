@@ -15,8 +15,11 @@ from app.services import search, structured_search
 router = APIRouter(prefix="/search", tags=["search"])
 
 
-@router.post("", response_model=list[SearchHit])
+@router.post("", response_model=list[SearchHit], summary="Semantic search over document content")
 async def semantic_search(body: SearchRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """Searches chunk text across every document the caller can read.
+    `mode` is `vector` (pgvector embedding similarity), `keyword` (Postgres
+    full-text), or `hybrid` (both, merged -- the default)."""
     if body.mode == "vector":
         hits = await search.vector_search(db, user, body.query, k=body.k)
     elif body.mode == "keyword":
@@ -26,7 +29,7 @@ async def semantic_search(body: SearchRequest, user: User = Depends(get_current_
     return [SearchHit(**h.__dict__) for h in hits]
 
 
-@router.get("/fields")
+@router.get("/fields", summary="List fields available for structured search")
 async def searchable_fields(
     document_type_id: str | None = Query(default=None),
     user: User = Depends(get_current_user),
@@ -64,8 +67,12 @@ async def searchable_fields(
     return sorted(seen.values(), key=lambda e: e["label"])
 
 
-@router.post("/structured")
+@router.post("/structured", summary="Query extracted field values directly")
 async def structured(body: StructuredSearchRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """Unlike semantic search (which searches document *text*), this queries
+    the typed `FieldValue` table directly -- e.g. "invoices where total >
+    $500" -- using one of the fields listed by `GET /search/fields`. Set
+    `verified_only` to exclude values a human hasn't reviewed yet."""
     results = await structured_search.query(
         db, user, field_key=body.field_key, field_path=body.field_path, field_name=body.field_name,
         op=body.op, value=body.value, value2=body.value2,

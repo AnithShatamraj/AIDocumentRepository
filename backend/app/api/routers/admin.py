@@ -29,8 +29,11 @@ async def _get_or_create_config(db, tenant_id) -> AIConfig:
     return cfg
 
 
-@router.get("/config")
+@router.get("/config", summary="Get tenant AI configuration")
 async def get_config(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
+    """Per-tenant overrides for the AI/embedding provider, confidence
+    thresholds, and processing config, alongside the system-wide `defaults`
+    they override. Auto-creates an empty config row on first call."""
     cfg = await _get_or_create_config(db, admin.tenant_id)
     return {
         "provider_overrides": cfg.provider_overrides,
@@ -46,8 +49,10 @@ async def get_config(admin: User = Depends(require_admin), db: AsyncSession = De
     }
 
 
-@router.put("/config")
+@router.put("/config", summary="Update tenant AI configuration")
 async def update_config(body: ThresholdUpdate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
+    """Partial update -- any of `confidence_thresholds`, `provider_overrides`,
+    `processing_config` left null (omitted) is left unchanged."""
     cfg = await _get_or_create_config(db, admin.tenant_id)
     if body.confidence_thresholds is not None:
         cfg.confidence_thresholds = body.confidence_thresholds
@@ -62,8 +67,10 @@ async def update_config(body: ThresholdUpdate, admin: User = Depends(require_adm
     return {"status": "updated"}
 
 
-@router.get("/prompts")
+@router.get("/prompts", summary="List prompt versions")
 async def list_prompts(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
+    """Both tenant-specific prompt overrides and the system-wide defaults
+    (`tenant_id` null), newest version first per key."""
     rows = (await db.execute(
         select(PromptVersion).where((PromptVersion.tenant_id == admin.tenant_id) | (PromptVersion.tenant_id.is_(None)))
         .order_by(PromptVersion.key, PromptVersion.version.desc())
@@ -72,8 +79,11 @@ async def list_prompts(admin: User = Depends(require_admin), db: AsyncSession = 
              "template": p.template} for p in rows]
 
 
-@router.post("/prompts")
+@router.post("/prompts", summary="Create a new prompt version")
 async def create_prompt(body: PromptVersionCreate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
+    """Prompts are versioned and immutable, like document-type schemas --
+    this always appends the next version number for the given `key` and
+    marks it active, it never edits an existing version in place."""
     maxv = (await db.execute(
         select(func.coalesce(func.max(PromptVersion.version), 0)).where(
             PromptVersion.tenant_id == admin.tenant_id, PromptVersion.key == body.key)

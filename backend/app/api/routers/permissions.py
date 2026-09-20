@@ -25,8 +25,10 @@ async def _require_manage(db, user, document_id) -> Document:
     return doc
 
 
-@router.get("", response_model=list[PermissionOut])
+@router.get("", response_model=list[PermissionOut], summary="List a document's permission grants")
 async def list_permissions(document_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """Requires Manage permission on the document (owner, admin, or an
+    explicit `manage` grant) -- same gate as granting/revoking."""
     await _require_manage(db, user, document_id)
     rows = (await db.execute(
         select(DocumentPermission).where(DocumentPermission.document_id == document_id)
@@ -34,9 +36,12 @@ async def list_permissions(document_id: str, user: User = Depends(get_current_us
     return [PermissionOut.model_validate(p) for p in rows]
 
 
-@router.post("", response_model=PermissionOut, status_code=201)
+@router.post("", response_model=PermissionOut, status_code=201, summary="Grant a user or group access to a document")
 async def grant(document_id: str, body: PermissionGrant, request: Request,
                 user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
+    """Provide exactly one of `user_id` or `group_id`, and a `level` (one of
+    `PERM_LEVELS` -- read/update/delete/manage). Idempotent: granting the
+    same (target, level) twice returns the existing grant."""
     doc = await _require_manage(db, user, document_id)
     if body.level not in PERM_LEVELS:
         raise HTTPException(400, f"level must be one of {PERM_LEVELS}")
@@ -67,7 +72,7 @@ async def grant(document_id: str, body: PermissionGrant, request: Request,
     return PermissionOut.model_validate(perm)
 
 
-@router.delete("/{permission_id}", status_code=204)
+@router.delete("/{permission_id}", status_code=204, summary="Revoke a permission grant")
 async def revoke(document_id: str, permission_id: str, request: Request,
                  user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     doc = await _require_manage(db, user, document_id)

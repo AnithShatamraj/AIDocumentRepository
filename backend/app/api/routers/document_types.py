@@ -61,14 +61,14 @@ async def _active_fields(db: AsyncSession, dt: DocumentType) -> tuple[int | None
     return (schema.version, schema.fields) if schema else (None, [])
 
 
-@router.get("", response_model=list[DocumentTypeOut])
+@router.get("", response_model=list[DocumentTypeOut], summary="List document types")
 async def list_types(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     rows = await db.execute(
         select(DocumentType).where(DocumentType.tenant_id == user.tenant_id).order_by(DocumentType.name))
     return [DocumentTypeOut.model_validate(t) for t in rows.scalars().all()]
 
 
-@router.get("/{type_id}")
+@router.get("/{type_id}", summary="Get one document type + its active field schema")
 async def get_type(type_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != user.tenant_id:
@@ -81,7 +81,7 @@ async def get_type(type_id: str, user: User = Depends(get_current_user), db: Asy
     }
 
 
-@router.get("/{type_id}/schema")
+@router.get("/{type_id}/schema", summary="Get the compiled JSON Schema for a document type")
 async def get_schema(type_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     """Active field tree plus the compiled JSON Schema (useful for debugging)."""
     dt = await db.get(DocumentType, type_id)
@@ -93,8 +93,11 @@ async def get_schema(type_id: str, user: User = Depends(get_current_user), db: A
             "json_schema": compiled}
 
 
-@router.get("/{type_id}/versions")
+@router.get("/{type_id}/versions", summary="List a document type's schema version history (admin)")
 async def list_versions(type_id: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
+    """Field trees are immutable per version -- every schema edit mints a new
+    version rather than overwriting the old one, so already-extracted values
+    keep pointing at the version they were produced under. This lists them."""
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != admin.tenant_id:
         raise HTTPException(404, "Document type not found")
@@ -106,9 +109,11 @@ async def list_versions(type_id: str, admin: User = Depends(require_admin), db: 
             for s in rows]
 
 
-@router.post("", response_model=DocumentTypeOut, status_code=201)
+@router.post("", response_model=DocumentTypeOut, status_code=201, summary="Create a document type (admin)")
 async def create_type(body: DocumentTypeCreate, admin: User = Depends(require_admin),
                       db: AsyncSession = Depends(get_tenant_db)):
+    """Create a document type with an optional initial field schema (scalars,
+    objects, and lists of either). 409 if the name is already taken."""
     exists = (await db.execute(
         select(DocumentType).where(DocumentType.tenant_id == admin.tenant_id,
                                    func.lower(DocumentType.name) == body.name.strip().lower())
@@ -130,9 +135,11 @@ async def create_type(body: DocumentTypeCreate, admin: User = Depends(require_ad
     return DocumentTypeOut.model_validate(dt)
 
 
-@router.patch("/{type_id}", response_model=DocumentTypeOut)
+@router.patch("/{type_id}", response_model=DocumentTypeOut, summary="Update a document type (admin)")
 async def update_type(type_id: str, body: DocumentTypeUpdate, admin: User = Depends(require_admin),
                       db: AsyncSession = Depends(get_tenant_db)):
+    """Partial update. Any field left out of the body is unchanged. Passing
+    `fields` mints a new schema version rather than editing the current one."""
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != admin.tenant_id:
         raise HTTPException(404, "Document type not found")
@@ -158,8 +165,10 @@ async def update_type(type_id: str, body: DocumentTypeUpdate, admin: User = Depe
     return DocumentTypeOut.model_validate(dt)
 
 
-@router.delete("/{type_id}", status_code=204)
+@router.delete("/{type_id}", status_code=204, summary="Delete a document type (admin)")
 async def delete_type(type_id: str, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_tenant_db)):
+    """409 if any document is still tagged with this type -- reassign or
+    delete those documents first."""
     dt = await db.get(DocumentType, type_id)
     if not dt or dt.tenant_id != admin.tenant_id:
         raise HTTPException(404, "Document type not found")
@@ -173,7 +182,7 @@ async def delete_type(type_id: str, admin: User = Depends(require_admin), db: As
     await db.commit()
 
 
-@router.post("/validate")
+@router.post("/validate", summary="Validate a draft field schema without saving")
 async def validate_fields(body: dict, admin: User = Depends(require_admin)):
     """Dry-run validation for the builder UI — no persistence."""
     try:
