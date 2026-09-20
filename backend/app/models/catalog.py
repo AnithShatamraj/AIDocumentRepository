@@ -35,8 +35,11 @@ class DocumentType(Base, TimestampMixin):
         PGUUID(as_uuid=True), ForeignKey("type_schemas.id", ondelete="SET NULL"), nullable=True
     )
 
+    # passive_deletes: type_schemas.document_type_id is ON DELETE CASCADE, so
+    # deleting a type must leave its versions to the database. Without it the
+    # ORM tries to NULL that (NOT NULL) column on each child instead.
     schemas: Mapped[list["TypeSchema"]] = relationship(
-        back_populates="document_type", foreign_keys="TypeSchema.document_type_id"
+        back_populates="document_type", foreign_keys="TypeSchema.document_type_id", passive_deletes=True
     )
 
 
