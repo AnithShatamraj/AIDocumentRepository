@@ -131,7 +131,8 @@ async def resume_scenario():
                 await cleanup.execute(sql_delete(Document).where(Document.id == doc_id))
                 await cleanup.execute(sql_delete(TypeSchema).where(TypeSchema.tenant_id == tenant_id))
                 await cleanup.execute(sql_delete(DocumentType).where(DocumentType.tenant_id == tenant_id))
-                await cleanup.execute(sql_delete(Tenant).where(Tenant.id == tenant_id))
+                # tenant_id is a plain UUID (no local Tenant row), so clean up by it.
+                await cleanup.execute(sql_delete(User).where(User.tenant_id == tenant_id))
                 await cleanup.commit()
 
 
