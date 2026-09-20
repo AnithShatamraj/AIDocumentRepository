@@ -304,6 +304,70 @@ button.ghost.reject:hover:not(:disabled) { background: var(--danger); color: #ff
 .modal-card p { font-size: 15px; line-height: 1.7; }
 .modal-card li { line-height: 1.7; }
 
+/* ---- AI document-type builder: chat on the left, editor on the right ---- */
+.builder-page { display: flex; flex-direction: column; height: calc(100vh - 104px); min-height: 520px; }
+.builder-page .page-head { margin-bottom: 8px; flex: none; }
+.stepper { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; flex: none; }
+.step {
+  padding: 3px 11px; border-radius: 999px; font-size: 12px; color: var(--muted);
+  border: 1px solid var(--border);
+}
+.step.done { color: var(--success); border-color: var(--success); }
+.step.current { background: var(--primary); border-color: var(--primary); color: #fff; }
+
+.builder { flex: 1; min-height: 0; display: grid; gap: 14px; grid-template-columns: minmax(320px, 5fr) minmax(400px, 7fr); }
+.builder-chat, .builder-panel { display: flex; flex-direction: column; min-height: 0; padding: 0; overflow: hidden; }
+
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.bubble {
+  max-width: 92%; padding: 10px 13px; border-radius: 12px; font-size: 14px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.bubble.assistant { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--border); border-top-left-radius: 4px; }
+.bubble.user { align-self: flex-end; background: var(--primary); color: #fff; border-top-right-radius: 4px; }
+.bubble .proposal {
+  margin-top: 8px; padding: 8px 10px; font-size: 13px; background: var(--bg);
+  border-left: 3px solid var(--primary-2); border-radius: 6px;
+}
+.chat-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; white-space: normal; }
+.chat-actions button { padding: 6px 11px; font-size: 13px; }
+.typing { display: flex; gap: 4px; padding: 13px 15px; }
+.typing span { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: typing 1.2s infinite ease-in-out; }
+.typing span:nth-child(2) { animation-delay: 0.15s; }
+.typing span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing { 0%, 60%, 100% { opacity: 0.25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
+
+.composer { flex: none; display: flex; gap: 8px; align-items: flex-end; padding: 10px; border-top: 1px solid var(--border); }
+.composer textarea { flex: 1; resize: none; min-height: 40px; max-height: 140px; margin: 0; }
+
+fieldset.builder-lock { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; border: 0; margin: 0; padding: 0; }
+fieldset.builder-lock:disabled { opacity: 0.6; }
+.panel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; }
+.panel-block { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
+.panel-foot {
+  flex: none; display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-top: 1px solid var(--border); background: var(--surface);
+}
+.sample-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; }
+.sample-kind { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.sample-row.odd { border-left: 3px solid var(--warn); padding-left: 8px; margin-left: -2px; }
+.sample-warning {
+  margin-top: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; color: var(--warn);
+  border: 1px solid var(--warn); border-radius: 6px; background: rgba(242, 182, 76, 0.08);
+}
+.pill.ok { color: var(--success); border-color: var(--success); background: transparent; }
+.pill.warn { color: var(--warn); border-color: var(--warn); background: transparent; }
+
+/* An assistant message that needs the admin's attention (e.g. samples that don't belong together) */
+.bubble.warn { border-color: var(--warn); background: rgba(242, 182, 76, 0.08); }
+.bubble .warn-title { color: var(--warn); font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+
+@media (max-width: 1000px) {
+  .builder-page { height: auto; }
+  .builder { grid-template-columns: 1fr; }
+  .builder-chat { height: 70vh; }
+}
+
 @media (max-width: 1100px) {
   .doc-page { height: auto; }
   .doc-workspace { flex-direction: column; }

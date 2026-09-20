@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import {
@@ -31,9 +32,16 @@ function SchemaOutline({ fields, depth = 0 }: { fields: any[]; depth?: number })
   );
 }
 
+const STAGE_LABEL: Record<string, string> = {
+  describe: "Describing", name: "Naming", samples: "Samples", fields: "Designing fields",
+};
+
 export function DocumentTypes() {
   const qc = useQueryClient();
-  const [editing, setEditing] = useState<any | null>(null); // null = closed, {} = new
+  const nav = useNavigate();
+  const location = useLocation();
+  const publishedName: string | undefined = (location.state as any)?.published;
+  const [editing, setEditing] = useState<any | null>(null); // null = closed; an existing type otherwise
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
   const [fields, setFields] = useState<FieldDefDraft[]>([]);
@@ -43,6 +51,11 @@ export function DocumentTypes() {
   const { data: types } = useQuery({
     queryKey: ["document-types"],
     queryFn: () => api.get("/api/document-types"),
+  });
+
+  const { data: drafts } = useQuery({
+    queryKey: ["type-drafts"],
+    queryFn: () => api.get("/api/document-type-drafts"),
   });
 
   // Details (schema + version) for every type, for the outline column.
@@ -57,12 +70,28 @@ export function DocumentTypes() {
       ),
   });
 
-  function startNew() {
-    setEditing({});
-    setName("");
-    setDesc("");
-    setFields([emptyField()]);
+  // New types are authored in the AI-assisted builder page, not in this modal.
+  async function startNew() {
     setErr("");
+    setBusy(true);
+    try {
+      const d = await api.post("/api/document-type-drafts");
+      qc.invalidateQueries({ queryKey: ["type-drafts"] });
+      nav(`/document-types/drafts/${d.id}`);
+    } catch (e: any) {
+      setErr(e.message || String(e));
+      setBusy(false);
+    }
+  }
+
+  async function discardDraft(d: any) {
+    if (!window.confirm(`Discard the draft “${d.title}”? Its conversation and samples are deleted.`)) return;
+    try {
+      await api.del(`/api/document-type-drafts/${d.id}`);
+      qc.invalidateQueries({ queryKey: ["type-drafts"] });
+    } catch (e: any) {
+      setErr(e.message || String(e));
+    }
   }
 
   async function startEdit(t: any) {
@@ -86,13 +115,9 @@ export function DocumentTypes() {
       const check = await api.post("/api/document-types/validate", { name, fields: payload });
       if (!check.valid) throw new Error(check.error);
 
-      if (editing?.id) {
-        await api.patch(`/api/document-types/${editing.id}`, {
-          name, description: desc, fields: payload,
-        });
-      } else {
-        await api.post("/api/document-types", { name, description: desc, fields: payload });
-      }
+      await api.patch(`/api/document-types/${editing.id}`, {
+        name, description: desc, fields: payload,
+      });
       qc.invalidateQueries({ queryKey: ["document-types"] });
       qc.invalidateQueries({ queryKey: ["document-type-details"] });
       setEditing(null);
@@ -136,10 +161,41 @@ export function DocumentTypes() {
             repeat (lists) — editing them creates a new schema version.
           </div>
         </div>
-        <button onClick={startNew}>+ New document type</button>
+        <button onClick={startNew} disabled={busy}>+ New document type</button>
       </div>
 
+      {publishedName && (
+        <div className="card ok" style={{ marginBottom: 14 }}>
+          Published <strong>{publishedName}</strong> — it's now available when uploading documents.
+        </div>
+      )}
       {err && !editing && <div className="card err" style={{ marginBottom: 14 }}>{err}</div>}
+
+      {drafts && drafts.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <div className="muted" style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+            In-progress drafts
+          </div>
+          <div className="grid cols-2">
+            {drafts.map((d: any) => (
+              <div className="card spread" key={d.id}>
+                <div style={{ minWidth: 0 }}>
+                  <strong style={{ fontSize: 14 }}>{d.title}</strong>{" "}
+                  <span className="pill">{STAGE_LABEL[d.stage] || d.stage}</span>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                    {d.field_count} field(s) · {d.sample_count} sample(s) · edited{" "}
+                    {new Date(d.updated_at).toLocaleString()}
+                  </div>
+                </div>
+                <div className="row" style={{ gap: 6 }}>
+                  <button className="secondary" onClick={() => nav(`/document-types/drafts/${d.id}`)}>Resume</button>
+                  <button className="ghost reject" onClick={() => discardDraft(d)} title="Discard draft">✕</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid cols-2">
         {(types || []).map((t: any) => {
@@ -180,8 +236,8 @@ export function DocumentTypes() {
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="spread" style={{ marginBottom: 16 }}>
               <h2 style={{ margin: 0 }}>
-                {editing?.id ? `Edit “${editing.name}”` : "New document type"}
-                {editing?.id && <span className="pill" style={{ marginLeft: 8 }}>saves as v{(editing.schema_version || 0) + 1}</span>}
+                Edit “{editing.name}”
+                <span className="pill" style={{ marginLeft: 8 }}>saves as v{(editing.schema_version || 0) + 1}</span>
               </h2>
               <button className="ghost" onClick={() => setEditing(null)} disabled={busy}>✕ Close</button>
             </div>
@@ -215,7 +271,7 @@ export function DocumentTypes() {
 
             <div className="row" style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
               <button onClick={save} disabled={busy}>
-                {busy ? "Saving…" : editing?.id ? "Save new version" : "Create document type"}
+                {busy ? "Saving…" : "Save new version"}
               </button>
               <button className="ghost" onClick={() => setEditing(null)} disabled={busy}>Cancel</button>
             </div>
