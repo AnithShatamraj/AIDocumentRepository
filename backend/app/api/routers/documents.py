@@ -17,6 +17,7 @@ from app.models.constants import (
     AUDIT_DOWNLOAD,
     AUDIT_RESTORE,
     AUDIT_REVIEW,
+    AUDIT_TAG_CHANGE,
     AUDIT_UPLOAD,
     AUDIT_VIEW,
     DOC_FAILED,
@@ -41,13 +42,16 @@ from app.models.review import ReviewItem
 from app.models.tenant import User
 from app.schemas import (
     BulkExtractionReview,
+    BulkTagRequest,
     DocumentDetail,
     DocumentOut,
+    DocumentTagsSet,
     ExtractionEdit,
     ExtractionReview,
     PresignedUrl,
 )
 from app.services import audit, ingest_policy, mime, normalize, permissions
+from app.services import tags as tag_service
 from app.services.hashing import sha256_hex
 from app.storage import get_storage
 
@@ -290,12 +294,15 @@ async def bulk_upload(
 async def list_documents(
     q: str | None = Query(default=None),
     status_filter: str | None = Query(default=None, alias="status"),
+    tags: list[str] | None = Query(default=None, description="Tag names; repeat the parameter for several"),
+    match: str = Query(default="all", pattern="^(all|any)$",
+                       description="'all' = carries every listed tag, 'any' = at least one"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
     """Only documents the caller can read (owned, individually shared, or
-    shared via a group) -- optionally filtered by name substring (`q`) and/or
-    `processing_status`. Sorted newest first, capped at 200."""
+    shared via a group) -- optionally filtered by name substring (`q`),
+    `processing_status`, and/or `tags`. Sorted newest first, capped at 200."""
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
     stmt = select(Document).where(cond)
@@ -303,9 +310,90 @@ async def list_documents(
         stmt = stmt.where(Document.name.ilike(f"%{q}%"))
     if status_filter:
         stmt = stmt.where(Document.processing_status == status_filter)
+    if tags:
+        wanted = [t for t in (t.strip() for t in tags) if t]
+        found = await tag_service.resolve_names(db, user.tenant_id, wanted)
+        # Under "all", a tag name that doesn't exist means nothing can match.
+        # Counting only the resolved ids would quietly let documents through.
+        if match == "all" and len(found) < len({t.lower() for t in wanted}):
+            return []
+        stmt = stmt.where(tag_service.documents_with_tags_condition(
+            [t.id for t in found.values()], match_all=(match == "all")))
     stmt = stmt.order_by(Document.created_at.desc()).limit(200)
     rows = await db.execute(stmt)
     return [DocumentOut.model_validate(d) for d in rows.scalars().all()]
+
+
+@router.put("/{document_id}/tags", summary="Replace a document's tags")
+async def set_document_tags(
+    document_id: str, body: DocumentTagsSet, request: Request,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db),
+):
+    """Sets the document's complete tag list — anything omitted is removed.
+    Names that don't exist yet are created. Needs `update` on the document."""
+    doc = await db.get(Document, document_id)
+    if not doc or doc.tenant_id != user.tenant_id or doc.is_deleted:
+        raise HTTPException(404, "Document not found")
+    if not await permissions.has_permission(db, user, doc.id, PERM_UPDATE):
+        raise HTTPException(403, "You do not have permission to edit this document")
+    try:
+        applied = await tag_service.set_document_tags(
+            db, user=user, document_id=doc.id, names=body.tags)
+    except tag_service.TagError as e:
+        raise HTTPException(422, str(e))
+    await audit.log_event(
+        db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_TAG_CHANGE,
+        object_type="document", object_id=doc.id,
+        detail={"action": "set", "tags": [t.name for t in applied]},
+        ip_address=client_ip(request), commit=False)
+    await db.commit()
+    return {"tags": [{"id": str(t.id), "name": t.name} for t in applied]}
+
+
+@router.post("/bulk-tag", summary="Add or remove tags across many documents")
+async def bulk_tag(
+    body: BulkTagRequest, request: Request,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db),
+):
+    """Applies `add` and `remove` to every listed document the caller may edit.
+
+    Documents they cannot edit are skipped rather than failing the call — a
+    bulk selection spanning a permission boundary is normal, and the response
+    reports how many were left alone. Returns `{updated, skipped, ...}`.
+    """
+    try:
+        add_names = tag_service.normalize_many(body.add)
+        remove_names = tag_service.normalize_many(body.remove)
+    except tag_service.TagError as e:
+        raise HTTPException(422, str(e))
+    if not add_names and not remove_names:
+        raise HTTPException(422, "Provide at least one tag to add or remove")
+
+    allowed = await tag_service.updatable_document_ids(db, user, list(body.document_ids))
+    skipped = len(body.document_ids) - len(allowed)
+
+    to_add = [await tag_service.get_or_create(
+        db, tenant_id=user.tenant_id, name=n, created_by=user.id) for n in add_names]
+    to_remove = await tag_service.resolve_names(db, user.tenant_id, remove_names)
+    remove_ids = {t.id for t in to_remove.values()}
+
+    added = removed = 0
+    for doc_id in allowed:
+        a, r = await tag_service.apply_changes(
+            db, user=user, document_id=doc_id, add=to_add, remove_ids=remove_ids)
+        added += a
+        removed += r
+
+    await audit.log_event(
+        db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_TAG_CHANGE,
+        object_type="document", object_id=None,
+        detail={"action": "bulk", "documents": len(allowed), "skipped": skipped,
+                "add": add_names, "remove": remove_names,
+                "links_added": added, "links_removed": removed},
+        ip_address=client_ip(request), commit=False)
+    await db.commit()
+    return {"updated": len(allowed), "skipped": skipped,
+            "links_added": added, "links_removed": removed}
 
 
 @router.get("/{document_id}", response_model=DocumentDetail, summary="Get a document's full detail")

@@ -15,6 +15,7 @@ from app.api.routers import (
     pipeline,
     review,
     search,
+    tags,
     users,
 )
 
@@ -24,6 +25,7 @@ api_router.include_router(users.router)
 api_router.include_router(document_types.router)
 api_router.include_router(document_type_drafts.router)
 api_router.include_router(documents.router)
+api_router.include_router(tags.router)
 api_router.include_router(permissions.router)
 api_router.include_router(pipeline.router)
 api_router.include_router(search.router)

@@ -23,6 +23,7 @@ TAGS_METADATA = [
     {"name": "document-type-drafts",
      "description": "AI-assisted document type authoring: a guided, resumable chat that ends in a published type."},
     {"name": "documents", "description": "Upload, retrieval, versioning, extracted-data review, and lifecycle."},
+    {"name": "tags", "description": "Shared, flat tag taxonomy -- the human organizing axis over documents."},
     {"name": "permissions", "description": "Per-document sharing -- grant/revoke access."},
     {"name": "pipeline", "description": "Processing pipeline status and live progress (Server-Sent Events)."},
     {"name": "search", "description": "Semantic (vector/keyword/hybrid) and structured field search."},

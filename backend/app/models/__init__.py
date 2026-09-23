@@ -9,6 +9,7 @@ from app.models.document import (  # noqa: F401
     DocumentVersion,
     document_type_links,
 )
+from app.models.tag import Tag, document_tags  # noqa: F401
 from app.models.pipeline import PipelineRun, PipelineStage  # noqa: F401
 from app.models.content import (  # noqa: F401
     Chunk,
@@ -43,6 +44,8 @@ __all__ = [
     "DocumentPermission",
     "DocumentTypeDefaultPermission",
     "document_type_links",
+    "Tag",
+    "document_tags",
     "PipelineRun",
     "PipelineStage",
     "Chunk",
