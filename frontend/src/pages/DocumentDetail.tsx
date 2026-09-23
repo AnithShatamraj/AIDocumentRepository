@@ -7,6 +7,7 @@ import { CollapsibleSection } from "../components/CollapsibleSection";
 import { useLayoutNav } from "../components/Layout";
 import { PdfViewer, Highlight } from "../components/PdfViewer";
 import { FieldTree, FieldNode } from "../components/FieldTree";
+import { TagEditor } from "../components/TagEditor";
 
 const STAGE_LABEL: Record<string, string> = {
   text_extraction: "Text Extraction",
@@ -30,6 +31,7 @@ export function DocumentDetail() {
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [reviewing, setReviewing] = useState<Record<string, boolean>>({});
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [tagErr, setTagErr] = useState("");
   const [panelW, setPanelW] = useState(() => {
     const saved = parseInt(localStorage.getItem("aidocs_panel_w") || "380", 10);
     return isNaN(saved) ? 380 : Math.min(PANEL_MAX, Math.max(PANEL_MIN, saved));
@@ -215,6 +217,22 @@ export function DocumentDetail() {
     }
   }
 
+  async function saveTags(names: string[]) {
+    setTagErr("");
+    try {
+      await api.put(`/api/documents/${id}/tags`, { tags: names });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["document", id] }),
+        // The tag list carries per-caller document counts, so it goes stale
+        // the moment a document gains or loses one.
+        qc.invalidateQueries({ queryKey: ["tags"] }),
+        qc.invalidateQueries({ queryKey: ["documents"] }),
+      ]);
+    } catch (e: any) {
+      setTagErr(e.message);
+    }
+  }
+
   async function deleteItem(extractionId: string) {
     if (!window.confirm("Delete this item? This cannot be undone.")) return;
     setReviewing((r) => ({ ...r, [extractionId]: true }));
@@ -255,6 +273,14 @@ export function DocumentDetail() {
             {ocrUsed && <span className="pill">OCR</span>}
             {doc.document_types?.map((c: any) => <span key={c.id} className="pill">{c.name}</span>)}
           </div>
+          <div className="tag-row">
+            <span className="muted tag-label">Tags</span>
+            <TagEditor
+              value={(doc.tags || []).map((t: any) => t.name)}
+              onChange={saveTags}
+            />
+          </div>
+          {tagErr && <div className="muted tag-error">{tagErr}</div>}
         </div>
         <div className="row">
           <button className={focusMode ? "" : "ghost"} onClick={toggleFocusMode}

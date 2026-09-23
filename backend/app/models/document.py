@@ -81,6 +81,12 @@ class Document(Base, TimestampMixin):
     )
     document_types: Mapped[list["DocumentType"]] = relationship(
         "DocumentType", secondary=document_type_links)
+    # selectin, not the default lazy load: documents are read from async
+    # sessions all over the app, where a lazy load raises MissingGreenlet.
+    # selectin batches the whole result set into one extra query, so listing
+    # 200 documents with their tags is two queries, not 201.
+    tags: Mapped[list["Tag"]] = relationship(
+        "Tag", secondary="document_tags", lazy="selectin", order_by="Tag.name")
     permissions: Mapped[list["DocumentPermission"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )

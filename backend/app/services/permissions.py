@@ -30,12 +30,16 @@ def user_group_ids_sync(db: Session, user_id: uuid.UUID) -> list[uuid.UUID]:
 
 
 # ------------------------------------------------------ reusable SQL conditions
-def readable_documents_condition(
-    user: User, group_ids: list[uuid.UUID]
+def permitted_documents_condition(
+    user: User, group_ids: list[uuid.UUID], level: str = PERM_READ
 ) -> ColumnElement[bool]:
     """A boolean condition (usable wherever `Document` is in the FROM) that is
-    true for documents the user may READ. Admins see all tenant docs; owners see
-    their own; everyone else needs a matching ACL grant (any level implies read)."""
+    true for documents the user holds `level` on. Admins hold everything in
+    their tenant; owners hold every level on their own documents; everyone else
+    needs a matching ACL grant. Read is satisfied by a grant at any level;
+    higher levels require that level or `manage` — the same rule
+    `has_permission` applies to a single document, expressed as SQL so a whole
+    result set can be filtered in one query."""
     base = and_(Document.tenant_id == user.tenant_id, Document.is_deleted.is_(False))
     if user.role == ROLE_ADMIN:
         return base
@@ -44,13 +48,20 @@ def readable_documents_condition(
     if group_ids:
         principal.append(DocumentPermission.group_id.in_(group_ids))
 
-    acl = exists(
-        select(DocumentPermission.id).where(
-            DocumentPermission.document_id == Document.id,
-            or_(*principal),
-        )
-    )
+    conds = [DocumentPermission.document_id == Document.id, or_(*principal)]
+    if level != PERM_READ:
+        conds.append(DocumentPermission.level.in_([level, PERM_MANAGE]))
+
+    acl = exists(select(DocumentPermission.id).where(*conds))
     return and_(base, or_(Document.owner_id == user.id, acl))
+
+
+def readable_documents_condition(
+    user: User, group_ids: list[uuid.UUID]
+) -> ColumnElement[bool]:
+    """Documents the user may READ. The workhorse of permission-aware retrieval:
+    every search / Q&A / structured-search path filters through it."""
+    return permitted_documents_condition(user, group_ids, PERM_READ)
 
 
 # ------------------------------------------------------------- point checks

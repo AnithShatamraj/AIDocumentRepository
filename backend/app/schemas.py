@@ -100,6 +100,43 @@ class DraftValidateIn(BaseModel):
 
 
 # ------------------------------------------------------------------- documents
+class TagOut(BaseModel):
+    id: uuid.UUID
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
+class TagWithCount(BaseModel):
+    id: uuid.UUID
+    name: str
+    document_count: int
+
+
+class TagCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class TagRename(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class TagMerge(BaseModel):
+    into_id: uuid.UUID
+
+
+class DocumentTagsSet(BaseModel):
+    """The document's complete tag list after the call — not a delta."""
+    tags: list[str] = []
+
+
+class BulkTagRequest(BaseModel):
+    document_ids: list[uuid.UUID] = Field(min_length=1)
+    add: list[str] = []
+    remove: list[str] = []
+
+
 class DocumentOut(BaseModel):
     id: uuid.UUID
     name: str
@@ -112,6 +149,7 @@ class DocumentOut(BaseModel):
     processing_status: str
     owner_id: uuid.UUID
     created_at: dt.datetime
+    tags: list[TagOut] = []
 
     class Config:
         from_attributes = True
