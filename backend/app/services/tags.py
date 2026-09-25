@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import and_, delete, exists, func, insert, select, true
+from sqlalchemy import and_, delete, exists, false, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -145,9 +145,15 @@ def documents_with_tags_condition(tag_ids: list[uuid.UUID], *, match_all: bool) 
     name doesn't exist: under `match_all` an unknown tag means nothing can
     match, and counting only the resolved ids would wrongly let documents
     through.
+
+    An empty `tag_ids` fails *closed* — it selects nothing. This function is
+    only ever reached when a tag filter was asked for, so "none of the names
+    resolved" has to mean "no documents", never "no filter". Returning a
+    true condition here would hand back the entire corpus to someone who
+    asked to narrow it.
     """
     if not tag_ids:
-        return true()
+        return false()
     if not match_all:
         return exists(
             select(document_tags.c.tag_id).where(
