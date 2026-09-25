@@ -317,6 +317,12 @@ async def list_documents(
         # Counting only the resolved ids would quietly let documents through.
         if match == "all" and len(found) < len({t.lower() for t in wanted}):
             return []
+        # And if none of them resolved, the answer is "nothing" under either
+        # mode. An empty id list reads as "no tag filter at all" downstream,
+        # which would hand back the whole corpus to someone who asked to
+        # narrow it.
+        if wanted and not found:
+            return []
         stmt = stmt.where(tag_service.documents_with_tags_condition(
             [t.id for t in found.values()], match_all=(match == "all")))
     stmt = stmt.order_by(Document.created_at.desc()).limit(200)

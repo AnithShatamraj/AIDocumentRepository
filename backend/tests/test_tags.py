@@ -170,6 +170,15 @@ async def test_match_all_requires_every_tag(scenario):
         assert got == {scenario["secret"]}, "only the document carrying both"
 
 
+async def test_empty_tag_ids_select_nothing_not_everything(scenario):
+    """Fail closed. This function is only reached when a tag filter was asked
+    for, so "none of the names resolved" must mean no documents — returning a
+    true condition would hand back the whole corpus to someone narrowing it."""
+    async with AsyncSessionLocal() as db:
+        for match_all in (True, False):
+            assert await _filter(db, [], match_all=match_all) == set()
+
+
 async def test_unknown_tag_name_resolves_to_nothing(scenario):
     async with AsyncSessionLocal() as db:
         found = await tag_service.resolve_names(db, scenario["tenant_id"], ["legal", "nope"])

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { streamPost } from "../api/client";
 
@@ -8,19 +8,33 @@ interface Msg {
   citations?: any[];
 }
 
+// Roughly six lines before the composer starts scrolling internally, so a long
+// question never grows the box until it pushes the conversation off screen.
+const COMPOSER_MAX_PX = 160;
+
 export function Research() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const convId = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const boxRef = useRef<HTMLTextAreaElement>(null);
 
   function scroll() {
     setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 30);
   }
 
-  async function ask(e: React.FormEvent) {
-    e.preventDefault();
+  // Grow the textarea to fit its content, up to a cap. Reset to "auto" first or
+  // scrollHeight keeps reporting the previous (taller) size and the box only
+  // ever grows.
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
+  }, [input]);
+
+  async function send() {
     if (!input.trim() || busy) return;
     const question = input.trim();
     setInput("");
@@ -65,11 +79,21 @@ export function Research() {
     } finally {
       setBusy(false);
       scroll();
+      boxRef.current?.focus();
+    }
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter sends, Shift+Enter starts a new line. The isComposing guard keeps
+    // an IME's "commit this candidate" Enter from sending a half-typed question.
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      void send();
     }
   }
 
   return (
-    <div>
+    <div className="research-page">
       <div className="page-head">
         <h1>AI Research Assistant</h1>
         <div className="muted">Grounded answers with citations, over documents you're authorized to read.</div>
@@ -96,9 +120,27 @@ export function Research() {
           ))}
           <div ref={bottomRef} />
         </div>
-        <form className="row" onSubmit={ask} style={{ marginTop: 12 }}>
-          <input placeholder="Ask about your documents…" value={input} onChange={(e) => setInput(e.target.value)} />
-          <button disabled={busy}>{busy ? "Thinking…" : "Ask"}</button>
+
+        <form
+          className="chat-composer"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void send();
+          }}
+        >
+          {/* Placeholder stays short: a longer hint wraps to a second line and
+              gets clipped by the one-row starting height at narrow widths, so
+              the Shift+Enter hint lives in the tooltip instead. */}
+          <textarea
+            ref={boxRef}
+            rows={1}
+            placeholder="Ask about your documents…"
+            title="Enter to send, Shift+Enter for a new line"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+          />
+          <button disabled={busy || !input.trim()}>{busy ? "Thinking…" : "Ask"}</button>
         </form>
       </div>
     </div>

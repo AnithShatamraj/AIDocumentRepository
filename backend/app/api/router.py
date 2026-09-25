@@ -9,6 +9,7 @@ from app.api.routers import (
     document_types,
     chat,
     dashboard,
+    discovery,
     documents,
     notifications,
     permissions,
@@ -29,6 +30,7 @@ api_router.include_router(tags.router)
 api_router.include_router(permissions.router)
 api_router.include_router(pipeline.router)
 api_router.include_router(search.router)
+api_router.include_router(discovery.router)
 api_router.include_router(chat.router)
 api_router.include_router(review.router)
 api_router.include_router(dashboard.router)

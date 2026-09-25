@@ -190,6 +190,9 @@ class SearchRequest(BaseModel):
     query: str
     mode: str = "hybrid"  # vector | keyword | hybrid
     k: int = 10
+    # Restrict the search to these documents. Omit for the whole readable
+    # corpus; an empty list is NOT the same thing — see search.vector_search.
+    document_ids: list[uuid.UUID] | None = None
 
 
 class SearchHit(BaseModel):
@@ -213,6 +216,28 @@ class StructuredSearchRequest(BaseModel):
     document_type_id: uuid.UUID | None = None
     verified_only: bool = False
     limit: int = 100
+
+
+class FieldConditionIn(BaseModel):
+    """One structured predicate: pick a field by stable key or explicit path."""
+    field_key: str | None = None
+    field_path: str | None = None
+    op: str = "eq"
+    value: str | None = None
+    value2: str | None = None
+
+
+class FindDocumentsRequest(BaseModel):
+    document_type_ids: list[uuid.UUID] = []
+    tags: list[str] = []
+    tags_match: str = Field(default="all", pattern="^(all|any)$")
+    field_conditions: list[FieldConditionIn] = []
+    name_contains: str | None = None
+    status: str | None = None
+    created_after: dt.datetime | None = None
+    created_before: dt.datetime | None = None
+    verified_only: bool = False
+    limit: int = Field(default=200, ge=1, le=500)
 
 
 class ChatRequest(BaseModel):

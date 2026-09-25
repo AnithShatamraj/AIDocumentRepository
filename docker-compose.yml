@@ -161,6 +161,19 @@ services:
     profiles: ["apps"]
     environment:
       VITE_API_BASE_URL: http://localhost:8000
+      # A bind mount from a Windows/macOS host delivers no inotify events into
+      # a Linux container, so without polling Vite never notices an edit and
+      # keeps serving the last version it transformed. See frontend/vite.config.ts.
+      CHOKIDAR_USEPOLLING: "true"
+    # Bind-mount source so Vite serves the working tree, not the snapshot its
+    # Dockerfile COPY'd at build time -- same reason the api service mounts
+    # ./backend/app. Without this the container silently serves whatever the
+    # image was built from, which drifts further from main every week.
+    # node_modules stays an anonymous volume: the image's deps are built for
+    # linux, and the host's (Windows) would shadow them with wrong binaries.
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     ports:
       - "5173:5173"
     depends_on:

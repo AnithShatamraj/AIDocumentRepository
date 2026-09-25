@@ -125,8 +125,23 @@ h2 { font-size: 16px; margin: 0 0 12px; }
 .login-card { width: 360px; }
 
 /* Chat */
-.chat { display: flex; flex-direction: column; height: calc(100vh - 120px); }
+/* Same shape as .doc-page / .builder-page: one flex column that owns the
+   viewport height, with the heading inside it. The chat used to size itself
+   with its own calc() while .page-head sat outside as a sibling, so the two
+   heights added up and pushed the composer below the fold at every width. */
+.research-page { display: flex; flex-direction: column; height: calc(100vh - 104px); min-height: 0; }
+.research-page .page-head { flex: none; margin-bottom: 12px; }
+.chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .messages { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 4px; }
+/* Deliberately not `.composer` -- that class belongs to the builder's chat
+   panel, whose border-top and padding don't apply here, and whose rules come
+   later in this file and would win. */
+.chat-composer { flex: none; display: flex; gap: 12px; align-items: flex-end; margin-top: 12px; }
+.chat-composer textarea {
+  flex: 1; resize: none; overflow-y: auto; min-height: 40px; max-height: 160px;
+  line-height: 1.45;
+}
+.chat-composer button { flex: none; height: 40px; }
 .msg { max-width: 80%; padding: 12px 14px; border-radius: 12px; white-space: pre-wrap; line-height: 1.5; }
 .msg.user { align-self: flex-end; background: var(--primary); }
 .msg.assistant { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--border); }
