@@ -14,15 +14,19 @@ Organization) so a hit is legible without opening the document.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
+from dataclasses import dataclass
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.constants import RV_AUTO_ACCEPTED, RV_CORRECTED, RV_VERIFIED
 from app.models.content import FieldValue
-from app.models.document import Document
+from app.models.document import Document, document_type_links
 from app.models.tenant import User
 from app.services import permissions
+from app.services import tags as tag_service
 
 _VERIFIED_STATES = (RV_VERIFIED, RV_CORRECTED, RV_AUTO_ACCEPTED)
 
@@ -105,6 +109,127 @@ async def query(
     return out
 
 
+@dataclass
+class FieldCondition:
+    """One structured predicate over an extracted field.
+
+    `field_key` matches a leaf wherever it sits (any nesting, any list index);
+    `field_path` pins an explicit pattern where `[]` means "any index".
+    """
+
+    field_key: str | None = None
+    field_path: str | None = None
+    op: str = "eq"
+    value: str | None = None
+    value2: str | None = None
+
+
+class UnknownTag(LookupError):
+    """A requested tag name doesn't exist, and the match mode needs them all."""
+
+
+async def find_documents(
+    db: AsyncSession,
+    user: User,
+    *,
+    document_type_ids: list[uuid.UUID] | None = None,
+    tags: list[str] | None = None,
+    tags_match_all: bool = True,
+    field_conditions: list[FieldCondition] | None = None,
+    name_contains: str | None = None,
+    status: str | None = None,
+    created_after: dt.datetime | None = None,
+    created_before: dt.datetime | None = None,
+    verified_only: bool = False,
+    limit: int = 200,
+) -> list[dict]:
+    """Find *documents* matching several structured criteria at once.
+
+    `query()` above answers "which field values match this one predicate";
+    this answers "which documents satisfy all of these", which is the shape
+    scope-building and agent tool calls actually need. Every predicate is
+    ANDed, and field predicates become correlated EXISTS subqueries so a
+    document qualifies when *some* value of that field matches — the right
+    reading for repeating fields inside lists.
+
+    Raises `UnknownTag` when `tags_match_all` is set and a name doesn't
+    resolve: no document can carry a tag that doesn't exist, and quietly
+    dropping the name would return a wider set than was asked for.
+    """
+    group_ids = await permissions.user_group_ids(db, user.id)
+    filters = [permissions.readable_documents_condition(user, group_ids)]
+
+    if name_contains:
+        filters.append(Document.name.ilike(f"%{name_contains}%"))
+    if status:
+        filters.append(Document.processing_status == status)
+    if created_after:
+        filters.append(Document.created_at >= created_after)
+    if created_before:
+        filters.append(Document.created_at <= created_before)
+
+    if document_type_ids:
+        filters.append(exists(
+            select(document_type_links.c.document_id).where(
+                document_type_links.c.document_id == Document.id,
+                document_type_links.c.document_type_id.in_(document_type_ids),
+            )
+        ))
+
+    if tags:
+        resolved = await tag_service.resolve_names(db, user.tenant_id, tags)
+        if tags_match_all and len(resolved) < len({t.lower() for t in tags}):
+            missing = sorted({t for t in tags if t.lower() not in resolved})
+            raise UnknownTag(f"No such tag: {', '.join(missing)}")
+        if not resolved:
+            # Tags were asked for and none exist. An empty id list reads as
+            # "no tag filter" downstream, which would widen the result to the
+            # whole corpus instead of narrowing it to nothing.
+            return []
+        filters.append(tag_service.documents_with_tags_condition(
+            [t.id for t in resolved.values()], match_all=tags_match_all))
+
+    for c in field_conditions or []:
+        sub = [
+            FieldValue.document_id == Document.id,
+            FieldValue.document_version == Document.current_version,
+            FieldValue.node_kind == "scalar",
+        ]
+        if c.field_key:
+            sub.append(FieldValue.field_key == c.field_key)
+        if c.field_path:
+            sub.append(FieldValue.field_path.like(_path_like(c.field_path), escape="\\"))
+        if verified_only:
+            sub.append(FieldValue.review_status.in_(_VERIFIED_STATES))
+        if c.value is not None and c.op:
+            sub.append(_value_filter(c.op, c.value, c.value2))
+        filters.append(exists(select(FieldValue.id).where(and_(*sub))))
+
+    stmt = (
+        select(Document)
+        # document_types is a plain lazy relationship; without this it would
+        # raise MissingGreenlet the moment we read it on an async session.
+        .options(selectinload(Document.document_types))
+        .where(and_(*filters))
+        .order_by(Document.created_at.desc())
+        .limit(limit)
+    )
+    docs = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": str(d.id),
+            "name": d.name,
+            "processing_status": d.processing_status,
+            "file_type": d.file_type,
+            "current_version": d.current_version,
+            "created_at": d.created_at.isoformat(),
+            "document_types": [{"id": str(t.id), "name": t.name} for t in d.document_types],
+            "tags": [{"id": str(t.id), "name": t.name} for t in d.tags],
+        }
+        for d in docs
+    ]
+
+
 def _value_filter(op: str, value: str, value2: str | None):
     # Date parsing is a strict whole-string match; number parsing is a loose
     # substring regex. Check date FIRST, or a date like "2026-03-15" gets
@@ -141,6 +266,14 @@ def _value_filter(op: str, value: str, value2: str | None):
             return FieldValue.value_number < n
         if op == "lte":
             return FieldValue.value_number <= n
+
+    if op == "eq":
+        # Equality has to mean equality. This used to fall through to the
+        # substring match below, so "city equals Mumbai" also returned
+        # "Mumbai, MH" -- even though the search UI offers "equals" and
+        # "contains" as separate operators. Case-insensitive, because the
+        # stored casing is whatever the extractor produced.
+        return func.lower(FieldValue.value_text) == value.strip().lower()
 
     return FieldValue.value_text.ilike(f"%{value}%")
 

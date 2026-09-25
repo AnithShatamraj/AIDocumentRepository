@@ -19,13 +19,18 @@ router = APIRouter(prefix="/search", tags=["search"])
 async def semantic_search(body: SearchRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db)):
     """Searches chunk text across every document the caller can read.
     `mode` is `vector` (pgvector embedding similarity), `keyword` (Postgres
-    full-text), or `hybrid` (both, merged -- the default)."""
+    full-text), or `hybrid` (both, merged -- the default).
+
+    Pass `document_ids` to restrict the search to a set of documents. A small
+    set also makes the vector pass exact rather than approximate, so the result
+    really is the best match in that set."""
+    ids = body.document_ids
     if body.mode == "vector":
-        hits = await search.vector_search(db, user, body.query, k=body.k)
+        hits = await search.vector_search(db, user, body.query, k=body.k, document_ids=ids)
     elif body.mode == "keyword":
-        hits = await search.keyword_search(db, user, body.query, k=body.k)
+        hits = await search.keyword_search(db, user, body.query, k=body.k, document_ids=ids)
     else:
-        hits = await search.hybrid_search(db, user, body.query, k=body.k)
+        hits = await search.hybrid_search(db, user, body.query, k=body.k, document_ids=ids)
     return [SearchHit(**h.__dict__) for h in hits]
 
 

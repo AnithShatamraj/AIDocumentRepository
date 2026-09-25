@@ -27,6 +27,8 @@ TAGS_METADATA = [
     {"name": "permissions", "description": "Per-document sharing -- grant/revoke access."},
     {"name": "pipeline", "description": "Processing pipeline status and live progress (Server-Sent Events)."},
     {"name": "search", "description": "Semantic (vector/keyword/hybrid) and structured field search."},
+    {"name": "discovery",
+     "description": "Find documents by structured criteria, and the type/field/value vocabulary to build those criteria with."},
     {"name": "chat", "description": "AI Research Assistant -- streaming RAG chat over your documents."},
     {"name": "review", "description": "Cross-document review queue for low-confidence AI results."},
     {"name": "dashboard", "description": "Operational metrics and widgets."},
