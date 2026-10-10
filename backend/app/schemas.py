@@ -240,6 +240,15 @@ class FindDocumentsRequest(BaseModel):
     limit: int = Field(default=200, ge=1, le=500)
 
 
+class ConversationRename(BaseModel):
+    title: str = Field(min_length=1, max_length=512)
+
+
+class MessageFeedback(BaseModel):
+    vote: str = Field(pattern="^(up|down)$")
+    reason: str | None = Field(default=None, max_length=2000)
+
+
 class ChatRequest(BaseModel):
     question: str
     conversation_id: uuid.UUID | None = None
