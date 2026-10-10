@@ -44,6 +44,10 @@ class Hit:
     anchor: str | None
     section_title: str | None
     score: float
+    # {page, rects[], page_width, page_height} -- exactly the PDF viewer's
+    # highlight shape, so a citation can open the document at the block it
+    # came from instead of dropping the reader on page 1.
+    bbox: dict | None = None
 
 
 async def _embed_query(query: str) -> list[float]:
@@ -145,7 +149,7 @@ async def vector_search(
         hits.append(Hit(
             chunk_id=chunk.id, document_id=chunk.document_id, document_name=doc_name,
             content=chunk.content, page=chunk.page, anchor=chunk.anchor,
-            section_title=chunk.section_title, score=float(1.0 - dist),
+            section_title=chunk.section_title, score=float(1.0 - dist), bbox=chunk.bbox,
         ))
     return hits
 
@@ -176,7 +180,8 @@ async def keyword_search(
     rows = await db.execute(stmt)
     return [
         Hit(chunk_id=c.id, document_id=c.document_id, document_name=name, content=c.content,
-            page=c.page, anchor=c.anchor, section_title=c.section_title, score=float(r))
+            page=c.page, anchor=c.anchor, section_title=c.section_title, score=float(r),
+            bbox=c.bbox)
         for c, name, r in rows.all()
     ]
 

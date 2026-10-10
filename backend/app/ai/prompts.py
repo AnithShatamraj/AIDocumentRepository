@@ -9,7 +9,11 @@ PROMPT_VERSIONS = {
     "classify": "classify@v1",
     "summarize": "summarize@v1",
     "extract": "extract@v1",
-    "chat": "chat@v1",
+    # v2: cite every factual sentence, and state what could not be found
+    # instead of quietly answering only the easy half of the question.
+    "chat": "chat@v5",
+    "rewrite": "rewrite@v1",
+    "verify": "verify@v2",
 }
 
 CLASSIFY_SYSTEM = """You are a document classification engine.
@@ -52,12 +56,77 @@ Document text (truncated):
 \"\"\""""
 
 CHAT_SYSTEM = """You are an enterprise research assistant. Answer ONLY from the
-provided CONTEXT passages, which are the user's authorized documents. If the
-context is insufficient to answer, say so plainly and do not guess. Cite sources
-inline using [n] markers that correspond to the numbered context passages.
+provided CONTEXT passages, which are the user's authorized documents.
+
+Rules:
+- Every sentence that states a fact must end with the [n] marker(s) of the
+  passage(s) it came from. A sentence with no marker will be treated as
+  unsupported and shown to the user as such.
+- Never merge two passages into one claim unless both markers are present.
+- Partial information is still an answer. If the context gives you even one of
+  several things asked for, give exactly that, then name what is missing. Never
+  reply with a bare refusal while holding any part of the answer.
+- When asked to compare or tabulate, make each row a source document, naming
+  it, and fill every column only from what that document itself states. Never
+  create a row for a category you inferred, and mark missing cells "not found"
+  rather than withholding the whole table.
+- Only attach a value to a place, party or property when the passage states
+  that link. Two facts sitting in the same passage are not thereby connected —
+  a party's home address is not the address of the property, and a figure near
+  a city name is not that city's figure.
+- Do not pad a gap with general knowledge.
+- If the context contains nothing relevant at all, say so and stop.
+- Do not state how many documents or passages you searched; the interface
+  reports that separately and your count would contradict it.
 
 CONTEXT:
 {context}"""
+
+# The retrieval query is built from the user's latest message, which in a
+# follow-up is often unusable on its own ("what about the second one?"). The
+# conversation is what makes it meaningful, so resolve it before embedding.
+REWRITE_SYSTEM = """Rewrite the user's latest message into a standalone search
+query that will make sense with no conversation history.
+
+- Resolve pronouns and references ("it", "that contract", "the second one")
+  into the concrete thing they refer to, using the conversation.
+- Keep the user's own wording wherever it is already specific.
+- Do not answer the question, expand its scope, or add terms the user never
+  implied.
+- If the message already stands alone, return it unchanged.
+
+Return STRICT JSON: {"query": "<standalone query>"}"""
+
+REWRITE_USER = """Conversation so far:
+{history}
+
+Latest message: {question}"""
+
+# Groundedness is an acceptance criterion, so it is checked rather than hoped
+# for: a second pass reads the answer back against the passages it cites.
+VERIFY_SYSTEM = """You check whether an answer is supported by the passages it cites.
+
+For each factual sentence in the ANSWER, decide whether the passages named by
+its [n] markers actually support it. Judge only what the passages say — not
+whether the claim is true in general.
+
+- supported: the cited passages state or directly entail the sentence.
+- unsupported: they do not, or the sentence cites nothing at all.
+- Ignore anything that makes no factual claim: greetings, transitions, or an
+  explicit statement that something could not be found.
+- A table row or cell reading "not found", "n/a" or similar is a statement of
+  absence, not an unsupported claim. Judge such a row only on the cells that
+  do carry a value, and if it carries none, skip it. Flagging honest "not
+  found" cells trains the reader to ignore the warnings that matter.
+
+Return STRICT JSON:
+{"claims": [{"sentence": "<verbatim>", "cited": [<n>, ...], "supported": true|false, "why": "<short>"}]}"""
+
+VERIFY_USER = """PASSAGES:
+{context}
+
+ANSWER:
+{answer}"""
 
 
 def render(template: str, **kwargs) -> str:

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, API_BASE, tokenStore } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
@@ -158,6 +158,19 @@ export function DocumentDetail() {
     await api.post(`/api/documents/${id}/reprocess`);
     qc.invalidateQueries({ queryKey: ["pipeline", id] });
   }
+
+  // A citation on the Research page hands the highlight over in router state,
+  // so clicking [2] opens this document at the block the answer came from
+  // rather than dropping the reader on page 1. Re-applied when the viewer URL
+  // resolves, since the PDF may not have loaded when we first arrive.
+  const location = useLocation();
+  useEffect(() => {
+    const handed = (location.state as any)?.highlight;
+    if (handed?.page) {
+      setHighlight(handed);
+      setHlNonce((n) => n + 1);
+    }
+  }, [location.state, viewerUrl]);
 
   function jumpToField(e: any) {
     if (e.source_bbox && e.source_bbox.page) {
