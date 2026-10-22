@@ -91,3 +91,28 @@ def test_stub_embeddings_deterministic_and_similar():
     similar = emb.embed(["eagle midnight lands"], model="stub").vectors[0]
     unrelated = emb.embed(["quarterly financial spreadsheet totals"], model="stub").vectors[0]
     assert dot(v1, similar) > dot(v1, unrelated)
+
+
+def _hit(n: int):
+    import uuid
+
+    from app.services.search import Hit
+
+    return Hit(chunk_id=uuid.UUID(int=n), document_id=uuid.UUID(int=0), document_name="d",
+               content="", page=1, anchor=None, section_title=None, score=0.0)
+
+
+def test_interleave_gives_each_query_a_slot_and_dedupes():
+    from app.services.chat import _interleave
+
+    main = [_hit(1), _hit(2), _hit(3)]
+    pune = [_hit(10), _hit(2)]      # chunk 2 is shared with the main list
+    out = [h.chunk_id.int for h in _interleave([main, pune], limit=10)]
+    assert out == [1, 10, 2, 3]     # round-robin, no duplicate of 2
+
+
+def test_interleave_respects_limit():
+    from app.services.chat import _interleave
+
+    out = _interleave([[_hit(i) for i in range(1, 6)], [_hit(i) for i in range(6, 11)]], limit=4)
+    assert [h.chunk_id.int for h in out] == [1, 6, 2, 7]

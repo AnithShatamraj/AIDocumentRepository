@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +36,8 @@ from app.models.chat import Conversation, Message, QAAuditLog
 from app.models.document import Document
 from app.models.tenant import User
 from app.services import answer_check, permissions, search
+
+log = logging.getLogger(__name__)
 
 # The offline stub's hashing embeddings compress cosine similarity into a narrow,
 # noisy band, so it needs a lower grounding floor than real embeddings (and can't
