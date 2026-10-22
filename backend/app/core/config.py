@@ -6,6 +6,7 @@ everything via env / secrets.
 """
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Literal
 
@@ -171,6 +172,13 @@ class Settings(BaseSettings):
         if self.embedding_provider == "openai" and not self.openai_api_key:
             return "stub"
         return self.embedding_provider
+
+
+# docker-compose's env_file passes `OPENAI_BASE_URL=` through as an empty string
+# (not unset). The OpenAI SDK reads that variable itself and treats "" as a real
+# base URL, so every request fails with "missing http:// or https://". Unset it.
+if not os.environ.get("OPENAI_BASE_URL", "x"):
+    del os.environ["OPENAI_BASE_URL"]
 
 
 @lru_cache

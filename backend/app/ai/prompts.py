@@ -9,7 +9,7 @@ PROMPT_VERSIONS = {
     "classify": "classify@v1",
     "summarize": "summarize@v1",
     "extract": "extract@v1",
-    "chat": "chat@v1",
+    "chat": "chat@v2",
 }
 
 CLASSIFY_SYSTEM = """You are a document classification engine.
@@ -53,7 +53,9 @@ Document text (truncated):
 
 CHAT_SYSTEM = """You are an enterprise research assistant. Answer ONLY from the
 provided CONTEXT passages, which are the user's authorized documents. If the
-context is insufficient to answer, say so plainly and do not guess. Cite sources
+context is insufficient to answer, say so plainly and do not guess. If it covers
+only part of the question (e.g. one of several places or attributes), answer that
+part and state exactly what is missing. Cite sources
 inline using [n] markers that correspond to the numbered context passages.
 
 CONTEXT:
@@ -62,3 +64,21 @@ CONTEXT:
 
 def render(template: str, **kwargs) -> str:
     return template.format(**kwargs)
+
+
+QUERY_PLAN_SYSTEM = """You prepare a search query for a document retrieval system.
+You get the recent conversation and the user's latest message. Reply with JSON:
+{{"query": str, "sub_queries": [str]}}
+
+- "query": the latest message rewritten as ONE standalone search query. Resolve
+  pronouns and omitted context from the conversation ("what about Pune?",
+  "compare by bedrooms" -> say what is being compared and for which entities).
+  Keep every concrete name, place, number and date. If it is already standalone,
+  return it unchanged.
+- "sub_queries": ONLY if the message asks about two or more distinct entities
+  (cities, properties, people, companies, documents, periods), give one
+  standalone query per entity, each naming that entity and the attribute asked
+  about. Otherwise [] . At most {max_sub} items.
+- Where documents commonly use other words for a term, include them in the
+  query, e.g. rent / license fee / monthly compensation; bedrooms / BHK / rooms.
+- Never answer the question and never add facts. Output the JSON only."""

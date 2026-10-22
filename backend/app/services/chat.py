@@ -6,9 +6,12 @@ hallucinate.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import logging
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +23,8 @@ from app.core.config import settings
 from app.models.chat import Conversation, Message, QAAuditLog
 from app.models.tenant import User
 from app.services import search
+
+log = logging.getLogger(__name__)
 
 # The offline stub's hashing embeddings compress cosine similarity into a narrow,
 # noisy band, so it needs a lower grounding floor than real embeddings (and can't
@@ -47,6 +52,71 @@ def _est_tokens(s: str) -> int:
         return max(1, len(s) // 4)
 
 
+HISTORY_TURNS = 10        # recent messages used for follow-up resolution + answering
+MAX_SUB_QUERIES = 4       # per-entity searches for a comparison question
+SUB_QUERY_K = 4           # chunks fetched per entity
+MAX_CONTEXT_CHUNKS = 12   # cap when several queries contribute
+
+
+@dataclass
+class QueryPlan:
+    query: str
+    sub_queries: list[str] = field(default_factory=list)
+    tokens: int = 0
+
+
+async def _plan_queries(history: list[Message], question: str) -> QueryPlan:
+    """Turn the latest message into retrieval queries.
+
+    One cheap JSON call produces (a) the message rewritten as a standalone query
+    using the conversation, and (b) for multi-entity questions, one query per
+    entity. Any failure — offline stub, bad JSON, provider error — degrades to
+    the old behavior (search the raw question), plus the previous user turn for
+    follow-ups, so retrieval is never worse than before.
+    """
+    fallback = question
+    if history:
+        prev = next((m.content for m in reversed(history) if m.role == "user"), "")
+        if prev:
+            fallback = f"{prev}\n{question}"
+    if is_offline():
+        return QueryPlan(fallback)
+
+    convo = "\n".join(f"{m.role}: {m.content[:400]}" for m in history) or "(none)"
+    msgs = [
+        LLMMessage("system", prompts.render(prompts.QUERY_PLAN_SYSTEM, max_sub=MAX_SUB_QUERIES)),
+        LLMMessage("user", f"CONVERSATION:\n{convo}\n\nLATEST MESSAGE:\n{question}"),
+    ]
+    try:
+        data, res = await asyncio.to_thread(
+            get_llm().complete_json, msgs, model=settings.llm_chat_model,
+            temperature=0.0, max_tokens=400)
+    except Exception:  # noqa: BLE001
+        log.warning("query_plan_failed", exc_info=True)
+        return QueryPlan(fallback)
+
+    query = data.get("query") if isinstance(data, dict) else None
+    if not isinstance(query, str) or not query.strip():
+        return QueryPlan(fallback, tokens=res.prompt_tokens + res.completion_tokens)
+    subs = data.get("sub_queries")
+    subs = [s.strip() for s in subs if isinstance(s, str) and s.strip()] if isinstance(subs, list) else []
+    return QueryPlan(query.strip(), subs[:MAX_SUB_QUERIES], res.prompt_tokens + res.completion_tokens)
+
+
+def _interleave(lists: list[list[search.Hit]], limit: int) -> list[search.Hit]:
+    """Round-robin merge of ranked hit lists, de-duplicated by chunk, capped."""
+    out: list[search.Hit] = []
+    seen: set[uuid.UUID] = set()
+    for rank in range(max((len(x) for x in lists), default=0)):
+        for hits in lists:
+            if rank < len(hits) and hits[rank].chunk_id not in seen:
+                seen.add(hits[rank].chunk_id)
+                out.append(hits[rank])
+                if len(out) >= limit:
+                    return out
+    return out
+
+
 async def stream_answer(
     db: AsyncSession, user: User, conversation: Conversation, question: str, k: int = 8
 ) -> AsyncIterator[dict]:
@@ -59,22 +129,40 @@ async def stream_answer(
         yield {"type": "done", "refused": True}
         return
 
+    # Prior turns: needed both to resolve follow-ups for retrieval and for the
+    # answering prompt. Read before this turn is persisted, newest N kept.
+    history = list(reversed((await db.execute(
+        select(Message).where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.desc()).limit(HISTORY_TURNS))).scalars().all()))
+
+    # --- Plan retrieval: standalone query (+ one per entity for comparisons) ---
+    plan = await _plan_queries(history, question)
+    queries = [plan.query, *plan.sub_queries]
+
     # --- Refusal on insufficient grounding ---
     # Gate on raw vector cosine similarity (RRF fused scores aren't an absolute
-    # relevance measure); refuse when the best chunk isn't similar enough.
-    vec_hits = await search.vector_search(db, user, question, k=k)
-    top_sim = vec_hits[0].score if vec_hits else 0.0
+    # relevance measure); refuse when no query finds a chunk similar enough. The
+    # gate sees the *rewritten* query: a bare follow-up like "compare by
+    # bedrooms" scores below the floor on its own although the thread's topic
+    # makes it perfectly answerable.
+    vec_hits_by_query = [await search.vector_search(db, user, q, k=k) for q in queries]
+    top_sim = max((h[0].score for h in vec_hits_by_query if h), default=0.0)
     floor = OFFLINE_SIM_FLOOR if is_offline() else settings.rag_min_similarity
-    if not vec_hits or top_sim < floor:
+    if top_sim < floor:
         yield {"type": "meta", "citations": []}
         yield {"type": "delta", "text": REFUSAL}
-        await _persist(db, user, conversation, question, REFUSAL, [], [], refused=True, tokens=0)
+        await _persist(db, user, conversation, question, REFUSAL, [], [], refused=True,
+                       tokens=plan.tokens)
         yield {"type": "done", "refused": True}
         return
 
-    # Fuse vector + keyword for final context ordering.
-    hits = await search.hybrid_search(db, user, question, k=k)
-    adequate = hits[:k] or vec_hits[:k]
+    # Fuse vector + keyword per query, then interleave so every entity in a
+    # comparison gets context slots rather than the loudest one taking them all.
+    per_query = [await search.hybrid_search(db, user, q, k=k if i == 0 else SUB_QUERY_K)
+                 for i, q in enumerate(queries)]
+    adequate = _interleave(per_query, limit=k if len(queries) == 1 else MAX_CONTEXT_CHUNKS)
+    if not adequate:
+        adequate = [h for hits in vec_hits_by_query for h in hits][:k]
 
     citations = []
     context_blocks = []
@@ -87,11 +175,6 @@ async def stream_answer(
             "snippet": h.content[:280],
         })
     context = "\n\n".join(context_blocks)
-
-    # Prior turns for follow-up continuity.
-    history = (await db.execute(
-        select(Message).where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at).limit(10))).scalars().all()
 
     llm_messages = [LLMMessage("system", prompts.render(prompts.CHAT_SYSTEM, context=context))]
     for m in history:
@@ -107,7 +190,7 @@ async def stream_answer(
         yield {"type": "delta", "text": delta}
     answer = "".join(answer_parts)
 
-    tokens = _est_tokens(context + question + answer)
+    tokens = _est_tokens(context + question + answer) + plan.tokens
     await _persist(
         db, user, conversation, question, answer, citations,
         [c["chunk_id"] for c in citations], refused=False, tokens=tokens,
