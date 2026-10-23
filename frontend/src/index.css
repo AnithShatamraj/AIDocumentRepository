@@ -663,3 +663,15 @@ button.promote-btn { padding: 4px 10px; font-size: 12px; }
 /* ---- Editing an existing type in the wizard ---- */
 .stale-banner { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap;
   margin-bottom: 12px; font-size: 13px; border-left: 4px solid var(--warn); }
+
+/* ---- Document page: which side the content is on ----
+   The content (summary + extracted data) sits on the left by default and the
+   document on the right. The DOM order is unchanged (document first), so the
+   swap is only a reversal of the row. Stacked on narrow screens, the content
+   goes above the document. */
+.doc-workspace.content-left { flex-direction: row-reverse; }
+@media (max-width: 1100px) {
+  .doc-workspace.content-left { flex-direction: column-reverse; }
+}
+/* Header actions keep their labels on one line (they wrapped to two at narrow widths). */
+.doc-page .page-head > .row button { white-space: nowrap; }

@@ -23,7 +23,25 @@ const STAGE_LABEL: Record<string, string> = {
 };
 
 const PANEL_MIN = 280;
-const PANEL_MAX = 720;
+const PANEL_MAX = 960;
+// The content (summary + extracted data) is what people work in, so it gets about
+// half the workspace by default rather than a narrow strip. A width the user has
+// dragged to is remembered; this only applies until they do. (New storage key:
+// the old one held widths chosen for the narrow-panel layout.)
+const PANEL_FRACTION = 0.48;
+const PANEL_KEY = "aidocs_panel_w_v2";
+const SIDE_KEY = "aidocs_doc_side";
+
+const clampPanel = (w: number) => Math.min(PANEL_MAX, Math.max(PANEL_MIN, Math.round(w)));
+
+/** Default content width from the window, before the workspace has been measured:
+ * what's left after the nav sidebar (if open) and the page padding. */
+function defaultPanelWidth(): number {
+  let navOpen = true;
+  try { navOpen = localStorage.getItem("aidocs_nav_collapsed") !== "1"; } catch { /* private mode */ }
+  const available = window.innerWidth - (navOpen ? 220 : 0) - 48;
+  return clampPanel(available * PANEL_FRACTION);
+}
 
 export function DocumentDetail() {
   const { id } = useParams();
@@ -42,9 +60,21 @@ export function DocumentDetail() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [tagErr, setTagErr] = useState("");
   const [panelW, setPanelW] = useState(() => {
-    const saved = parseInt(localStorage.getItem("aidocs_panel_w") || "380", 10);
-    return isNaN(saved) ? 380 : Math.min(PANEL_MAX, Math.max(PANEL_MIN, saved));
+    let saved = NaN;
+    try { saved = parseInt(localStorage.getItem(PANEL_KEY) || "", 10); } catch { /* private mode */ }
+    return isNaN(saved) ? defaultPanelWidth() : clampPanel(saved);
   });
+  // Which side the content (summary + extracted data) is on. Left by default;
+  // a person who prefers the document there can swap, and it is remembered.
+  const [contentLeft, setContentLeft] = useState(() => {
+    try { return localStorage.getItem(SIDE_KEY) !== "doc-left"; } catch { return true; }
+  });
+  function swapSides() {
+    setContentLeft((left) => {
+      try { localStorage.setItem(SIDE_KEY, left ? "doc-left" : "content-left"); } catch { /* private mode */ }
+      return !left;
+    });
+  }
   const [dragging, setDragging] = useState(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
 
@@ -72,7 +102,8 @@ export function DocumentDetail() {
         prevNavCollapsed.current = navCollapsed;
         prevPanelW.current = panelW;
         setNavCollapsed(true);
-        setPanelW(PANEL_MAX);
+        // Wide, but never so wide the document is squeezed out (the nav is collapsing too).
+        setPanelW(clampPanel(window.innerWidth * 0.6));
         setSummarySectionOpen(false);
         setTimelineOverride(false);
         setExtractedOpen(true);
@@ -138,28 +169,28 @@ export function DocumentDetail() {
     return () => window.removeEventListener("keydown", onKey);
   }, [summaryOpen, detailsOpen]);
 
-  // Splitter drag (pointer events cover mouse + touch): resize the right
-  // panel against the workspace's right edge.
+  // Splitter drag (pointer events cover mouse + touch). The panel is anchored to
+  // whichever edge of the workspace it sits against, so its width is measured
+  // from that edge: from the left when the content is on the left, else the right.
   const startDrag = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
     setDragging(true);
     const onMove = (ev: PointerEvent) => {
       const rect = workspaceRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const w = Math.round(Math.min(PANEL_MAX, Math.max(PANEL_MIN, rect.right - ev.clientX)));
-      setPanelW(w);
+      setPanelW(clampPanel(contentLeft ? ev.clientX - rect.left : rect.right - ev.clientX));
     };
     const onUp = () => {
       setDragging(false);
       window.removeEventListener("pointermove", onMove);
       setPanelW((w) => {
-        localStorage.setItem("aidocs_panel_w", String(w));
+        try { localStorage.setItem(PANEL_KEY, String(w)); } catch { /* private mode */ }
         return w;
       });
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
-  }, []);
+  }, [contentLeft]);
 
   async function openExternally() {
     const res = await api.get(`/api/documents/${id}/download`);
@@ -430,6 +461,11 @@ export function DocumentDetail() {
           {tagErr && <div className="muted tag-error">{tagErr}</div>}
         </div>
         <div className="row">
+          <button className="ghost" onClick={swapSides}
+                  title={contentLeft ? "Put the document on the left and the content on the right"
+                                     : "Put the content on the left and the document on the right"}>
+            ⇄ Swap sides
+          </button>
           <button className={focusMode ? "" : "ghost"} onClick={toggleFocusMode}
                   title="Collapse the nav and other sections to give the document and extracted data more room">
             {focusMode ? "⤢ Exit Focus" : "⛶ Focus Mode"}
@@ -439,7 +475,7 @@ export function DocumentDetail() {
         </div>
       </div>
 
-      <div className="doc-workspace" ref={workspaceRef}>
+      <div className={`doc-workspace${contentLeft ? " content-left" : ""}`} ref={workspaceRef}>
         {/* Document — always in view */}
         <div className="doc-main">
           {isPdf ? (
