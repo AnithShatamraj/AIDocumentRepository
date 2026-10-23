@@ -5,14 +5,12 @@ import { api } from "../api/client";
 import { TypePicker } from "../components/TypePicker";
 import { FieldPicker, SearchableField } from "../components/FieldPicker";
 
-export function Search() {
+/** Search UI shown inside the Documents page's expandable search panel. Every
+ * result is filtered by the caller's read permissions server-side. */
+export function SearchPanel() {
   const [tab, setTab] = useState<"semantic" | "structured">("semantic");
   return (
     <div>
-      <div className="page-head">
-        <h1>Search</h1>
-        <div className="muted">Every result is filtered by your read permissions.</div>
-      </div>
       <div className="toolbar">
         <button className={tab === "semantic" ? "" : "secondary"} onClick={() => setTab("semantic")}>
           Semantic / Hybrid
