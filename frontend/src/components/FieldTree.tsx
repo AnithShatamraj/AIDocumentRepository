@@ -9,6 +9,7 @@ export interface FieldNode {
   data_type: string;
   ordinal: number | null;
   is_discovered: boolean;
+  document_type_id: string | null;
   is_user_edited: boolean;
   raw_value: string | null;
   value_number: number | null;
@@ -31,12 +32,19 @@ interface Props {
   /** Remove one item from a list/table field. Only offered on direct
    * children of a `list` container -- see ContainerField. */
   onDelete: (id: string) => void;
+  /** New (discovered) fields can only be accepted by adding them to a document
+   * type. `onPromote` opens that flow; `canPromote` is false for non-admins, who
+   * can still reject. */
+  onPromote?: (n: FieldNode) => void;
+  canPromote?: boolean;
 }
 
 /** Recursive renderer: scalars are rows, objects are indented groups, lists are
  * numbered item cards. Every leaf keeps click-to-highlight, accept/reject (status
  * permitting), and manual edit at any depth. */
-export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview, onEdit, onDelete }: Props) {
+export function FieldTree({
+  nodes, depth = 0, isPdf, reviewing, onJump, onReview, onEdit, onDelete, onPromote, canPromote,
+}: Props) {
   return (
     <>
       {nodes.map((n) =>
@@ -50,6 +58,8 @@ export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview
             onJump={onJump}
             onReview={onReview}
             onEdit={onEdit}
+            onPromote={onPromote}
+            canPromote={canPromote}
           />
         ) : (
           <ContainerField
@@ -70,7 +80,7 @@ export function FieldTree({ nodes, depth = 0, isPdf, reviewing, onJump, onReview
 }
 
 function ScalarField({
-  node, depth, isPdf, busy, onJump, onReview, onEdit, onDelete,
+  node, depth, isPdf, busy, onJump, onReview, onEdit, onDelete, onPromote, canPromote,
 }: {
   node: FieldNode; depth: number; isPdf: boolean; busy: boolean;
   onJump: (n: FieldNode) => void; onReview: (id: string, a: "accept" | "reject") => void;
@@ -79,6 +89,8 @@ function ScalarField({
    * scalars (as opposed to a regular schema field) -- shows a Delete button
    * alongside Edit. */
   onDelete?: (id: string) => void;
+  onPromote?: (n: FieldNode) => void;
+  canPromote?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(node.raw_value || "");
@@ -105,7 +117,7 @@ function ScalarField({
       <div className="spread">
         <strong style={{ fontSize: 13 }}>
           {node.field_name}
-          {node.is_discovered && <span className="pill entity">entity</span>}
+          {node.is_discovered && <span className="pill entity" title="Found by the AI, but no document type defines it yet">new</span>}
           {node.is_user_edited && <span className="pill edited">edited</span>}
         </strong>
         <ReviewStatus status={node.review_status} />
@@ -144,7 +156,26 @@ function ScalarField({
             </>
           ) : (
             <>
-              {node.review_status === "pending_review" && (
+              {/* A new field is accepted by giving it a home: adding it to a
+                  document type. Rejecting stays a one-click action. */}
+              {node.is_discovered && onPromote && node.review_status !== "rejected" && (
+                <>
+                  <button
+                    className="promote-btn"
+                    disabled={busy || !canPromote}
+                    title={canPromote
+                      ? "Add this as a field of a document type (this also accepts it)"
+                      : "Only an administrator can add fields to a document type"}
+                    onClick={() => onPromote(node)}
+                  >
+                    ＋ Add to type
+                  </button>
+                  <button className="ghost reject" disabled={busy} onClick={() => onReview(node.id, "reject")}>
+                    ✕ Reject
+                  </button>
+                </>
+              )}
+              {!(node.is_discovered && onPromote) && node.review_status === "pending_review" && (
                 <>
                   <button className="ghost approve" disabled={busy} onClick={() => onReview(node.id, "accept")}>
                     ✓ Accept
@@ -154,7 +185,8 @@ function ScalarField({
                   </button>
                 </>
               )}
-              {["auto_accepted", "verified", "corrected"].includes(node.review_status) && (
+              {!(node.is_discovered && onPromote) &&
+                ["auto_accepted", "verified", "corrected"].includes(node.review_status) && (
                 <button className="ghost reject" disabled={busy} onClick={() => onReview(node.id, "reject")}>
                   ✕ Reject
                 </button>

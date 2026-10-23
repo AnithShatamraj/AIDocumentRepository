@@ -6,9 +6,7 @@ import { NotificationBell } from "./NotificationBell";
 const links = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/documents", label: "Documents" },
-  { to: "/search", label: "Search" },
-  { to: "/research", label: "Research Assistant" },
-  { to: "/review", label: "Review Queue" },
+  { to: "/research", label: "Research" },
   { to: "/document-types", label: "Document Types" },
   { to: "/admin", label: "Administration" },
 ];

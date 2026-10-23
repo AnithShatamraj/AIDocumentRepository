@@ -5,7 +5,7 @@ import { Login } from "./pages/Login";
 import { Dashboard } from "./pages/Dashboard";
 import { Documents } from "./pages/Documents";
 import { DocumentDetail } from "./pages/DocumentDetail";
-import { Search } from "./pages/Search";
+import { ResearchChat } from "./pages/ResearchChat";
 import { Research } from "./pages/Research";
 import { Review } from "./pages/Review";
 import { DocumentTypes } from "./pages/DocumentTypes";
@@ -31,8 +31,10 @@ export function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/documents" element={<Documents />} />
         <Route path="/documents/:id" element={<DocumentDetail />} />
-        <Route path="/search" element={<Search />} />
+        <Route path="/search" element={<Navigate to="/documents" replace />} />
         <Route path="/research" element={<Research />} />
+        <Route path="/research/new" element={<ResearchChat />} />
+        <Route path="/research/:id" element={<ResearchChat />} />
         <Route path="/review" element={<Review />} />
         <Route path="/document-types" element={<DocumentTypes />} />
         <Route path="/document-types/drafts/:id" element={<DocumentTypeBuilder />} />

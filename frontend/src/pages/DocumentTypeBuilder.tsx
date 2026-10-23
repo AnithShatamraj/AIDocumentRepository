@@ -50,11 +50,11 @@ function Rich({ text }: { text: string }) {
   );
 }
 
-function Stepper({ stage, published }: { stage: string; published: boolean }) {
+function Stepper({ stage, published, editing }: { stage: string; published: boolean; editing: boolean }) {
   const cur = published ? STEPS.length : STAGE_INDEX[stage] ?? 0;
   return (
     <div className="stepper">
-      {STEPS.map((s, i) => (
+      {(editing ? [...STEPS.slice(0, -1), "Save"] : STEPS).map((s, i) => (
         <span key={s} className={`step${i < cur ? " done" : ""}${i === cur ? " current" : ""}`}>
           {i < cur ? "✓ " : `${i + 1}. `}
           {s}
@@ -332,7 +332,9 @@ export function DocumentTypeBuilder() {
       qc.invalidateQueries({ queryKey: ["document-types"] });
       qc.invalidateQueries({ queryKey: ["document-type-details"] });
       qc.invalidateQueries({ queryKey: ["type-drafts"] });
-      nav("/document-types", { state: { published: r.document_type.name } });
+      nav("/document-types", {
+        state: draft?.edits_type_id ? { saved: r.document_type.name } : { published: r.document_type.name },
+      });
     } catch (e: any) {
       setPublishErr(e.message || String(e));
       setBusy(null);
@@ -347,6 +349,25 @@ export function DocumentTypeBuilder() {
       await api.del(`/api/document-type-drafts/${id}`);
       qc.invalidateQueries({ queryKey: ["type-drafts"] });
       nav("/document-types");
+    } catch (e: any) {
+      setErr(e.message || String(e));
+    }
+  }
+
+  /** The type changed after this edit draft began, so it can't be saved without
+   * overwriting that. Start again from the latest version (explicit, so no work
+   * is thrown away silently). */
+  async function reopenLatest() {
+    const typeId = draft?.edits_type_id;
+    if (!typeId) return;
+    if (!window.confirm("Discard this draft and start again from the latest version? Changes made in this draft are lost.")) return;
+    try {
+      window.clearTimeout(saveTimer.current);
+      dirty.current = false;
+      await api.del(`/api/document-type-drafts/${id}`);
+      const d = await api.post(`/api/document-type-drafts/from-type/${typeId}`);
+      qc.invalidateQueries({ queryKey: ["type-drafts"] });
+      nav(`/document-types/drafts/${d.id}`, { replace: true });
     } catch (e: any) {
       setErr(e.message || String(e));
     }
@@ -372,6 +393,10 @@ export function DocumentTypeBuilder() {
   if (!draft) return <div className="muted">Loading…</div>;
 
   const published = draft.status === "published";
+  // An edit draft changes an existing type instead of creating one. It is stale if
+  // the type moved on since the draft began: saving then would overwrite that.
+  const editing = !!draft.edits_type_id;
+  const stale = editing && !!draft.stale && !published;
   const stage: string = draft.stage;
   const messages: any[] = draft.messages || [];
   const lastIdx = messages.length - 1;
@@ -382,7 +407,7 @@ export function DocumentTypeBuilder() {
   const check = draft.sample_check;
   const flagged = !!check && check.related === false && !check.confirmed;
   const locked = busy === "message" || busy === "validate" || busy === "publish";
-  const canPublish = stage === "fields" && hasFields && name.trim() !== "" && !busy && !published;
+  const canPublish = stage === "fields" && hasFields && name.trim() !== "" && !busy && !published && !stale;
   const saveLabel = { saved: "All changes saved", saving: "Saving…", error: "Couldn't save — retrying on next edit" }[saveState];
 
   // Buttons under the latest assistant message. Samples that are already
@@ -407,8 +432,12 @@ export function DocumentTypeBuilder() {
     <div className="builder-page">
       <div className="page-head spread">
         <div>
-          <h1>New document type</h1>
-          <div className="muted">Describe it to the AI, refine the fields together, then publish.</div>
+          <h1>{editing ? `Edit ${draft.name || "document type"}` : "New document type"}</h1>
+          <div className="muted">
+            {editing
+              ? `Change the fields here or ask the AI, then save a new version${draft.base_schema_version ? ` (started from version ${draft.base_schema_version})` : ""}.`
+              : "Describe it to the AI, refine the fields together, then publish."}
+          </div>
         </div>
         <div className="row">
           <span className={saveState === "error" ? "err" : "muted"} style={{ fontSize: 12 }}>{saveLabel}</span>
@@ -418,7 +447,17 @@ export function DocumentTypeBuilder() {
           )}
         </div>
       </div>
-      <Stepper stage={stage} published={published} />
+      <Stepper stage={stage} published={published} editing={editing} />
+      {stale && (
+        <div className="card stale-banner">
+          <span>
+            <strong>{draft.edits_type_name || "This document type"}</strong> has changed since you started
+            editing (it's now on version {draft.type_schema_version ?? "?"}). Saving this draft would overwrite
+            that, so it's paused.
+          </span>
+          <button className="secondary" onClick={reopenLatest}>Discard &amp; reopen the latest</button>
+        </div>
+      )}
 
       <div className="builder">
         {/* ------------------------------------------------------------ chat */}
@@ -611,22 +650,28 @@ export function DocumentTypeBuilder() {
               {publishErr
                 ? publishErr
                 : published
-                ? `Published as “${draft.name}”.`
+                ? editing ? `Saved changes to “${draft.name}”.` : `Published as “${draft.name}”.`
+                : stale
+                ? "Paused: the document type changed since you started. Discard and reopen the latest version."
                 : busy === "message" || busy === "validate"
                 ? "The AI is working — editing is paused."
                 : stage !== "fields"
                 ? "Publishing unlocks once the fields step is reached."
                 : !hasFields
-                ? "Add at least one field to publish."
+                ? `Add at least one field to ${editing ? "save" : "publish"}.`
                 : !name.trim()
-                ? "Give the document type a name to publish."
+                ? `Give the document type a name to ${editing ? "save" : "publish"}.`
+                : editing
+                ? "Ready to save as a new version. Documents already processed keep the version they were read with."
                 : "Ready to publish. Approval workflow can be added later."}
             </span>
             {published ? (
               <button onClick={() => nav("/document-types")}>Back to document types</button>
             ) : (
               <button onClick={publish} disabled={!canPublish}>
-                {busy === "publish" ? "Publishing…" : "Publish document type"}
+                {busy === "publish"
+                  ? editing ? "Saving…" : "Publishing…"
+                  : editing ? "Save changes" : "Publish document type"}
               </button>
             )}
           </div>

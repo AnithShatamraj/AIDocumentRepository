@@ -477,11 +477,8 @@ def stage_embedding(self, run_id: str, tenant_id: str) -> str:
 
 
 # ------------------------------------------------------- schema-driven extract
-# Legacy value_type names the normalizer understands, keyed by schema data_type.
-_NORMALIZER_TYPE = {
-    "string": VT_TEXT, "number": "numeric", "integer": "numeric", "currency": "currency",
-    "date": "date", "datetime": "date", "time": VT_TEXT, "boolean": VT_TEXT,
-}
+# Shared with the API (field promotion converts a value to its new field's type).
+_NORMALIZER_TYPE = normalize.NORMALIZER_TYPE
 
 
 def _threshold_for(field_key: str, default: float, overrides: dict) -> float:

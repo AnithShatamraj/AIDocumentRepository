@@ -66,6 +66,16 @@ class DocumentTypeDraft(Base, TimestampMixin):
         PGUUID(as_uuid=True), ForeignKey("document_types.id", ondelete="SET NULL"), nullable=True
     )
 
+    # Set when this draft edits an existing type rather than creating one. It
+    # starts at the fields step (name and description already confirmed), and
+    # publishing saves a new schema version of that type instead of creating a
+    # type. `base_schema_version` is where it started, to catch a type that
+    # changed underneath it.
+    edits_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("document_types.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    base_schema_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
 
 class DocumentTypeDraftMessage(Base, TimestampMixin):
     __tablename__ = "document_type_draft_messages"

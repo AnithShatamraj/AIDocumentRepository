@@ -33,11 +33,9 @@ async def list_conversations(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_tenant_db),
 ):
-    stmt = select(Conversation).where(Conversation.user_id == user.id)
-    if q:
-        stmt = stmt.where(Conversation.title.ilike(f"%{q}%"))
-    rows = (await db.execute(stmt.order_by(Conversation.updated_at.desc()).limit(200))).scalars().all()
-    return [{"id": str(c.id), "title": c.title, "updated_at": c.updated_at.isoformat()} for c in rows]
+    """Most recently modified first. Each item carries a short `summary` of the
+    latest answer and the `documents` its answers cited, for the Research cards."""
+    return await chat.conversation_cards(db, user, q=q)
 
 
 @router.get("/conversations/{conversation_id}", summary="Get one conversation's message history")

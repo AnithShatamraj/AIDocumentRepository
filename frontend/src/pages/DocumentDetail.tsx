@@ -6,7 +6,10 @@ import { StatusBadge } from "../components/StatusBadge";
 import { CollapsibleSection } from "../components/CollapsibleSection";
 import { useLayoutNav } from "../components/Layout";
 import { PdfViewer, Highlight } from "../components/PdfViewer";
-import { FieldTree, FieldNode } from "../components/FieldTree";
+import { FieldNode } from "../components/FieldTree";
+import { FieldSections } from "../components/FieldSections";
+import { PromoteDialog, PromoteResult } from "../components/PromoteDialog";
+import { useAuth } from "../auth/AuthContext";
 import { TagEditor } from "../components/TagEditor";
 
 const STAGE_LABEL: Record<string, string> = {
@@ -20,22 +23,58 @@ const STAGE_LABEL: Record<string, string> = {
 };
 
 const PANEL_MIN = 280;
-const PANEL_MAX = 720;
+const PANEL_MAX = 960;
+// The content (summary + extracted data) is what people work in, so it gets about
+// half the workspace by default rather than a narrow strip. A width the user has
+// dragged to is remembered; this only applies until they do. (New storage key:
+// the old one held widths chosen for the narrow-panel layout.)
+const PANEL_FRACTION = 0.48;
+const PANEL_KEY = "aidocs_panel_w_v2";
+const SIDE_KEY = "aidocs_doc_side";
+
+const clampPanel = (w: number) => Math.min(PANEL_MAX, Math.max(PANEL_MIN, Math.round(w)));
+
+/** Default content width from the window, before the workspace has been measured:
+ * what's left after the nav sidebar (if open) and the page padding. */
+function defaultPanelWidth(): number {
+  let navOpen = true;
+  try { navOpen = localStorage.getItem("aidocs_nav_collapsed") !== "1"; } catch { /* private mode */ }
+  const available = window.innerWidth - (navOpen ? 220 : 0) - 48;
+  return clampPanel(available * PANEL_FRACTION);
+}
 
 export function DocumentDetail() {
   const { id } = useParams();
   const qc = useQueryClient();
+  const { user } = useAuth();
+  // Adding a field to a document type edits the type, which is admin-only.
+  const isAdmin = user?.role === "administrator";
+  const [promote, setPromote] = useState<{ nodes: FieldNode[]; thenAcceptRest: boolean } | null>(null);
+  const [notice, setNotice] = useState("");
   const [viewerUrl, setViewerUrl] = useState<string>("");
   const [highlight, setHighlight] = useState<Highlight | null>(null);
   const [hlNonce, setHlNonce] = useState(0);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [reviewing, setReviewing] = useState<Record<string, boolean>>({});
   const [bulkBusy, setBulkBusy] = useState(false);
   const [tagErr, setTagErr] = useState("");
   const [panelW, setPanelW] = useState(() => {
-    const saved = parseInt(localStorage.getItem("aidocs_panel_w") || "380", 10);
-    return isNaN(saved) ? 380 : Math.min(PANEL_MAX, Math.max(PANEL_MIN, saved));
+    let saved = NaN;
+    try { saved = parseInt(localStorage.getItem(PANEL_KEY) || "", 10); } catch { /* private mode */ }
+    return isNaN(saved) ? defaultPanelWidth() : clampPanel(saved);
   });
+  // Which side the content (summary + extracted data) is on. Left by default;
+  // a person who prefers the document there can swap, and it is remembered.
+  const [contentLeft, setContentLeft] = useState(() => {
+    try { return localStorage.getItem(SIDE_KEY) !== "doc-left"; } catch { return true; }
+  });
+  function swapSides() {
+    setContentLeft((left) => {
+      try { localStorage.setItem(SIDE_KEY, left ? "doc-left" : "content-left"); } catch { /* private mode */ }
+      return !left;
+    });
+  }
   const [dragging, setDragging] = useState(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
 
@@ -45,7 +84,6 @@ export function DocumentDetail() {
   // explicitly overrides it.
   const [summarySectionOpen, setSummarySectionOpen] = useState(true);
   const [extractedOpen, setExtractedOpen] = useState(true);
-  const [classificationsOpen, setClassificationsOpen] = useState(false);
   const [timelineOverride, setTimelineOverride] = useState<boolean | null>(null);
 
   // Focus mode: collapse the nav sidebar + every side-panel section except
@@ -64,9 +102,9 @@ export function DocumentDetail() {
         prevNavCollapsed.current = navCollapsed;
         prevPanelW.current = panelW;
         setNavCollapsed(true);
-        setPanelW(PANEL_MAX);
+        // Wide, but never so wide the document is squeezed out (the nav is collapsing too).
+        setPanelW(clampPanel(window.innerWidth * 0.6));
         setSummarySectionOpen(false);
-        setClassificationsOpen(false);
         setTimelineOverride(false);
         setExtractedOpen(true);
       } else {
@@ -118,36 +156,41 @@ export function DocumentDetail() {
       .catch(() => setViewerUrl(""));
   }, [id, isPdf, doc?.current_version]);
 
-  // ESC closes the summary modal.
+  // ESC closes whichever modal is open.
   useEffect(() => {
-    if (!summaryOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setSummaryOpen(false);
+    if (!summaryOpen && !detailsOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setSummaryOpen(false);
+        setDetailsOpen(false);
+      }
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [summaryOpen]);
+  }, [summaryOpen, detailsOpen]);
 
-  // Splitter drag (pointer events cover mouse + touch): resize the right
-  // panel against the workspace's right edge.
+  // Splitter drag (pointer events cover mouse + touch). The panel is anchored to
+  // whichever edge of the workspace it sits against, so its width is measured
+  // from that edge: from the left when the content is on the left, else the right.
   const startDrag = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
     setDragging(true);
     const onMove = (ev: PointerEvent) => {
       const rect = workspaceRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const w = Math.round(Math.min(PANEL_MAX, Math.max(PANEL_MIN, rect.right - ev.clientX)));
-      setPanelW(w);
+      setPanelW(clampPanel(contentLeft ? ev.clientX - rect.left : rect.right - ev.clientX));
     };
     const onUp = () => {
       setDragging(false);
       window.removeEventListener("pointermove", onMove);
       setPanelW((w) => {
-        localStorage.setItem("aidocs_panel_w", String(w));
+        try { localStorage.setItem(PANEL_KEY, String(w)); } catch { /* private mode */ }
         return w;
       });
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
-  }, []);
+  }, [contentLeft]);
 
   async function openExternally() {
     const res = await api.get(`/api/documents/${id}/download`);
@@ -218,9 +261,48 @@ export function DocumentDetail() {
     }
   }
 
+  /** New (discovered) fields still waiting for a decision, one per distinct
+   * fact -- the same fact is often found once per document type. */
+  function pendingNewFields(): FieldNode[] {
+    const seen = new Set<string>();
+    const out: FieldNode[] = [];
+    for (const f of (doc?.fields || []) as FieldNode[]) {
+      if (f.is_discovered && f.review_status === "pending_review" && !seen.has(f.field_key)) {
+        seen.add(f.field_key);
+        out.push(f);
+      }
+    }
+    return out;
+  }
+
+  /** Accept everything pending except new fields: those can only be accepted by
+   * giving them a document type. */
+  async function acceptRest() {
+    setBulkBusy(true);
+    try {
+      await api.post(`/api/documents/${id}/extractions/bulk-review`, { action: "accept", skip_new: true });
+      await refreshAfterReview();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   async function bulkReview(action: "accept" | "reject") {
-    const verb = action === "accept" ? "Accept" : "Reject";
-    if (!window.confirm(`${verb} all remaining pending fields on this document?`)) return;
+    if (action === "accept") {
+      const fresh = pendingNewFields();
+      // Administrators decide where the new fields go first; the rest is accepted after.
+      if (fresh.length && isAdmin) {
+        setPromote({ nodes: fresh, thenAcceptRest: true });
+        return;
+      }
+      const left = fresh.length
+        ? ` The ${fresh.length} new field${fresh.length === 1 ? "" : "s"} will be left for an administrator to add to a document type.`
+        : "";
+      if (!window.confirm(`Accept all remaining pending fields on this document?${left}`)) return;
+      await acceptRest();
+      return;
+    }
+    if (!window.confirm("Reject all remaining pending fields on this document?")) return;
     setBulkBusy(true);
     try {
       await api.post(`/api/documents/${id}/extractions/bulk-review`, { action });
@@ -228,6 +310,24 @@ export function DocumentDetail() {
     } finally {
       setBulkBusy(false);
     }
+  }
+
+  async function onPromoted(results: PromoteResult[]) {
+    const thenRest = promote?.thenAcceptRest;
+    setPromote(null);
+    const added = results.filter((r) => r.created_field);
+    const mapped = results.length - added.length;
+    const types = [...new Set(results.map((r) => r.document_type_name))].join(", ");
+    setNotice(
+      [added.length && `Added ${added.length} field${added.length === 1 ? "" : "s"} to ${types}`,
+       mapped && `${mapped} mapped to existing field${mapped === 1 ? "" : "s"}`]
+        .filter(Boolean).join(" · ") +
+        (added.length ? ". Reprocess other documents of this type to extract it there too." : ".")
+    );
+    qc.invalidateQueries({ queryKey: ["document-types"] });
+    qc.invalidateQueries({ queryKey: ["document-type-detail"] });
+    if (thenRest) await acceptRest();
+    else await refreshAfterReview();
   }
 
   async function saveTags(names: string[]) {
@@ -272,7 +372,46 @@ export function DocumentDetail() {
       0
     );
   const pendingCount = countPending(doc.fields || []);
-  const timelineOpen = timelineOverride ?? doc.processing_status === "processing";
+  // The timeline earns panel space only while the document is being processed or
+  // has a problem. `needs_review` counts as finished: processing is done, the
+  // reviewer's work is the extracted data.
+  const failed = doc.processing_status === "failed" || (pipeline?.stages || []).some((s: any) => s.status === "failed");
+  const inProgress = ["pending", "processing"].includes(doc.processing_status);
+  const timelineNeeded = inProgress || failed;
+  const timelineOpen = timelineOverride ?? timelineNeeded;
+  // Stage list + run totals, shown in the side panel while processing and in the
+  // "Processing details" popup afterwards.
+  const timelineBody = (
+    <>
+      <div className="timeline">
+        {(pipeline?.stages || []).map((s: any) => (
+          <div className="stage" key={s.name}>
+            <span className={`dot ${s.status}`} />
+            <div style={{ flex: 1 }}>
+              <div className="spread">
+                <span>{STAGE_LABEL[s.name] || s.name}</span>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {s.status}
+                  {s.latency_ms != null ? ` · ${s.latency_ms}ms` : ""}
+                  {s.cost_usd ? ` · $${s.cost_usd.toFixed(4)}` : ""}
+                </span>
+              </div>
+              {s.error_message && <div className="err" style={{ fontSize: 12 }}>{s.error_message}</div>}
+            </div>
+          </div>
+        ))}
+        {(!pipeline?.stages || pipeline.stages.length === 0) && (
+          <div className="muted">No pipeline run yet.</div>
+        )}
+      </div>
+      {pipeline?.run && (
+        <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+          Run cost ${pipeline.run.total_cost_usd?.toFixed(4)} · {pipeline.run.total_tokens} tokens
+        </div>
+      )}
+    </>
+  );
+
 
   return (
     <div className={`doc-page${focusMode ? " focus" : ""}`}>
@@ -284,18 +423,49 @@ export function DocumentDetail() {
             <span>{doc.file_type?.toUpperCase()} · v{doc.current_version}</span>
             {parser && <span className="pill">{parser}</span>}
             {ocrUsed && <span className="pill">OCR</span>}
-            {doc.document_types?.map((c: any) => <span key={c.id} className="pill">{c.name}</span>)}
+            {!timelineNeeded && pipeline?.run && (
+              <button className="ghost tiny" onClick={() => setDetailsOpen(true)}
+                      title="Stage timings, cost and tokens for the last processing run">
+                Processing details
+              </button>
+            )}
           </div>
-          <div className="tag-row">
-            <span className="muted tag-label">Tags</span>
-            <TagEditor
-              value={(doc.tags || []).map((t: any) => t.name)}
-              onChange={saveTags}
-            />
+          {/* Document types and tags share one row to leave the height to the
+              document. Types come first; the hover text keeps what the old
+              Classifications section showed: how sure the AI was, or that a
+              person set it. */}
+          <div className="tag-row meta-row">
+            <div className="meta-group">
+              <span className="muted tag-label">Document types</span>
+              {(doc.document_types || []).length === 0 && (
+                <span className="muted" style={{ fontSize: 13 }}>
+                  {inProgress ? "Classifying…" : "Not classified"}
+                </span>
+              )}
+              {(doc.document_types || []).map((t: any) => {
+                const c = (doc.classifications || []).find((x: any) => x.label === t.name);
+                const hint = !c ? undefined
+                  : c.source === "human" ? "Set manually"
+                  : `AI confidence ${Math.round((c.confidence || 0) * 100)}%`;
+                return <span key={t.id} className="pill" title={hint}>{t.name}</span>;
+              })}
+            </div>
+            <div className="meta-group meta-tags">
+              <span className="muted tag-label">Tags</span>
+              <TagEditor
+                value={(doc.tags || []).map((t: any) => t.name)}
+                onChange={saveTags}
+              />
+            </div>
           </div>
           {tagErr && <div className="muted tag-error">{tagErr}</div>}
         </div>
         <div className="row">
+          <button className="ghost" onClick={swapSides}
+                  title={contentLeft ? "Put the document on the left and the content on the right"
+                                     : "Put the content on the left and the document on the right"}>
+            ⇄ Swap sides
+          </button>
           <button className={focusMode ? "" : "ghost"} onClick={toggleFocusMode}
                   title="Collapse the nav and other sections to give the document and extracted data more room">
             {focusMode ? "⤢ Exit Focus" : "⛶ Focus Mode"}
@@ -305,7 +475,7 @@ export function DocumentDetail() {
         </div>
       </div>
 
-      <div className="doc-workspace" ref={workspaceRef}>
+      <div className={`doc-workspace${contentLeft ? " content-left" : ""}`} ref={workspaceRef}>
         {/* Document — always in view */}
         <div className="doc-main">
           {isPdf ? (
@@ -369,68 +539,70 @@ export function DocumentDetail() {
               )
             }
           >
-            {(doc.fields || []).length === 0 ? (
-              <div className="muted">No fields extracted yet.</div>
-            ) : (
-              <FieldTree
-                nodes={doc.fields}
-                isPdf={isPdf}
-                reviewing={reviewing}
-                onJump={jumpToField}
-                onReview={reviewField}
-                onEdit={editField}
-                onDelete={deleteItem}
-              />
-            )}
-          </CollapsibleSection>
-
-          <CollapsibleSection title="Classifications" open={classificationsOpen} onOpenChange={setClassificationsOpen}>
-            {(doc.classifications || []).length === 0 && <div className="muted">Not classified yet.</div>}
-            {(doc.classifications || []).map((c: any, i: number) => (
-              <div key={i} className="spread" style={{ padding: "4px 0" }}>
-                <span>{c.label} {c.source === "human" && <span className="pill">manual</span>}</span>
-                <span className="muted conf">{Math.round((c.confidence || 0) * 100)}%</span>
-              </div>
-            ))}
-          </CollapsibleSection>
-
-          <CollapsibleSection
-            title="Processing Timeline"
-            open={timelineOpen}
-            onOpenChange={setTimelineOverride}
-            badge={
-              pipeline?.run?.status === "running" ? <span className="pill">running</span> : undefined
-            }
-          >
-            <div className="timeline">
-              {(pipeline?.stages || []).map((s: any) => (
-                <div className="stage" key={s.name}>
-                  <span className={`dot ${s.status}`} />
-                  <div style={{ flex: 1 }}>
-                    <div className="spread">
-                      <span>{STAGE_LABEL[s.name] || s.name}</span>
-                      <span className="muted" style={{ fontSize: 12 }}>
-                        {s.status}
-                        {s.latency_ms != null ? ` · ${s.latency_ms}ms` : ""}
-                        {s.cost_usd ? ` · $${s.cost_usd.toFixed(4)}` : ""}
-                      </span>
-                    </div>
-                    {s.error_message && <div className="err" style={{ fontSize: 12 }}>{s.error_message}</div>}
-                  </div>
-                </div>
-              ))}
-              {(!pipeline?.stages || pipeline.stages.length === 0) && (
-                <div className="muted">No pipeline run yet.</div>
-              )}
-            </div>
-            {pipeline?.run && (
-              <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-                Run cost ${pipeline.run.total_cost_usd?.toFixed(4)} · {pipeline.run.total_tokens} tokens
+            {notice && (
+              <div className="fs-notice">
+                <span>{notice}</span>
+                <button className="ghost tiny" onClick={() => setNotice("")}>✕</button>
               </div>
             )}
+            <FieldSections
+              fields={(doc.fields || []) as FieldNode[]}
+              docTypes={(doc.document_types || []).map((t: any) => ({ id: t.id, name: t.name }))}
+              isPdf={isPdf}
+              reviewing={reviewing}
+              onJump={jumpToField}
+              onReview={reviewField}
+              onEdit={editField}
+              onDelete={deleteItem}
+              canPromote={isAdmin}
+              onPromote={(nodes) => setPromote({ nodes, thenAcceptRest: false })}
+            />
           </CollapsibleSection>
+
+          {/* Only while it matters: running, queued, or something went wrong.
+              A finished document gives this space to Summary and Extracted Data;
+              the same detail is behind "Processing details" in the header. */}
+          {timelineNeeded && (
+            <CollapsibleSection
+              title="Processing Timeline"
+              open={timelineOpen}
+              onOpenChange={setTimelineOverride}
+              badge={
+                pipeline?.run?.status === "running" ? <span className="pill">running</span> :
+                failed ? <span className="pill" style={{ color: "var(--danger)" }}>failed</span> : undefined
+              }
+            >
+              {timelineBody}
+            </CollapsibleSection>
+          )}
         </div>
       </div>
+
+      {promote && (
+        <PromoteDialog
+          docId={id!}
+          nodes={promote.nodes}
+          docTypes={(doc.document_types || []).map((t: any) => ({ id: t.id, name: t.name }))}
+          alternative={promote.thenAcceptRest
+            ? { label: "Accept the rest, leave these as new", onClick: () => { setPromote(null); void acceptRest(); } }
+            : undefined}
+          onClose={() => setPromote(null)}
+          onDone={onPromoted}
+        />
+      )}
+
+      {/* Processing details: out of the side panel once a document is done. */}
+      {detailsOpen && (
+        <div className="modal-overlay" onClick={() => setDetailsOpen(false)}>
+          <div className="modal-card sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Processing details">
+            <div className="spread" style={{ marginBottom: 12 }}>
+              <h2 style={{ margin: 0 }}>Processing details</h2>
+              <button className="ghost" onClick={() => setDetailsOpen(false)}>✕ Close</button>
+            </div>
+            {timelineBody}
+          </div>
+        </div>
+      )}
 
       {/* Fullscreen summary modal */}
       {summaryOpen && (

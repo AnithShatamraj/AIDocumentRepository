@@ -9,10 +9,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import client_ip, get_current_tenant, get_current_user, get_tenant_db, require_reviewer
+from app.api.deps import (
+    client_ip, get_current_tenant, get_current_user, get_tenant_db, require_admin, require_reviewer,
+)
 from app.core.config import settings
-from app.models.catalog import DocumentType
+from app.models.catalog import DocumentType, TypeSchema
 from app.models.constants import (
+    AUDIT_CONFIG_CHANGE,
     AUDIT_DELETE,
     AUDIT_DOWNLOAD,
     AUDIT_RESTORE,
@@ -36,21 +39,25 @@ from app.models.constants import (
     RV_VERIFIED,
 )
 from app.models.content import Classification, FieldValue, Summary
-from app.models.document import Document, DocumentVersion
+from app.models.document import Document, DocumentVersion, document_type_links
 from app.models.mgmt import Tenant as MgmtTenant
 from app.models.review import ReviewItem
 from app.models.tenant import User
 from app.schemas import (
     BulkExtractionReview,
     BulkTagRequest,
+    FieldSuggestRequest,
+    PromoteFieldsRequest,
     DocumentDetail,
+    DocumentListItem,
     DocumentOut,
     DocumentTagsSet,
     ExtractionEdit,
     ExtractionReview,
     PresignedUrl,
 )
-from app.services import audit, ingest_policy, mime, normalize, permissions
+from app.ai import field_suggest
+from app.services import audit, field_promotion, ingest_policy, mime, normalize, permissions
 from app.services import tags as tag_service
 from app.services.hashing import sha256_hex
 from app.storage import get_storage
@@ -68,6 +75,7 @@ def _field_dict(e: FieldValue) -> dict:
         "id": str(e.id), "field_key": e.field_key, "field_path": e.field_path,
         "field_name": e.field_name, "node_kind": e.node_kind, "data_type": e.data_type,
         "ordinal": e.ordinal, "is_discovered": e.is_discovered, "is_user_edited": e.is_user_edited,
+        "document_type_id": str(e.document_type_id) if e.document_type_id else None,
         "raw_value": e.raw_value, "value_type": e.value_type, "value_text": e.value_text,
         "value_number": e.value_number,
         "value_date": e.value_date.isoformat() if e.value_date else None,
@@ -246,6 +254,10 @@ async def upload(
     # Only fresh content needs the (paid) pipeline; clones and links reuse results.
     if meta.get("action") == "new":
         _trigger_pipeline(doc.id, tenant.id)
+    # A document created in this request has never had its `tags` loaded, and the
+    # response schema reads them: without this the upload succeeds, then the
+    # response fails with MissingGreenlet and the client is told it failed.
+    await db.refresh(doc)
     return {"document": DocumentOut.model_validate(doc).model_dump(), **meta}
 
 
@@ -290,7 +302,7 @@ async def bulk_upload(
     return {"results": results}
 
 
-@router.get("", response_model=list[DocumentOut], summary="List documents")
+@router.get("", response_model=list[DocumentListItem], summary="List documents")
 async def list_documents(
     q: str | None = Query(default=None),
     status_filter: str | None = Query(default=None, alias="status"),
@@ -302,7 +314,8 @@ async def list_documents(
 ):
     """Only documents the caller can read (owned, individually shared, or
     shared via a group) -- optionally filtered by name substring (`q`),
-    `processing_status`, and/or `tags`. Sorted newest first, capped at 200."""
+    `processing_status`, and/or `tags`. Sorted by last modified, newest first,
+    capped at 200."""
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
     stmt = select(Document).where(cond)
@@ -325,9 +338,26 @@ async def list_documents(
             return []
         stmt = stmt.where(tag_service.documents_with_tags_condition(
             [t.id for t in found.values()], match_all=(match == "all")))
-    stmt = stmt.order_by(Document.created_at.desc()).limit(200)
-    rows = await db.execute(stmt)
-    return [DocumentOut.model_validate(d) for d in rows.scalars().all()]
+    stmt = stmt.order_by(Document.updated_at.desc()).limit(200)
+    docs = (await db.execute(stmt)).scalars().all()
+
+    # Document types for the whole page in one query (a document can carry
+    # several; the list shows all of them).
+    types_by_doc: dict[uuid.UUID, list[dict]] = {}
+    if docs:
+        links = await db.execute(
+            select(document_type_links.c.document_id, DocumentType.id, DocumentType.name)
+            .join(DocumentType, DocumentType.id == document_type_links.c.document_type_id)
+            .where(document_type_links.c.document_id.in_([d.id for d in docs]))
+            .order_by(DocumentType.name))
+        for doc_id, type_id, type_name in links.all():
+            types_by_doc.setdefault(doc_id, []).append({"id": type_id, "name": type_name})
+
+    return [
+        DocumentListItem(**DocumentOut.model_validate(d).model_dump(),
+                         document_types=types_by_doc.get(d.id, []))
+        for d in docs
+    ]
 
 
 @router.put("/{document_id}/tags", summary="Replace a document's tags")
@@ -610,11 +640,12 @@ async def bulk_review_extractions(
         raise HTTPException(404, "Document not found")
 
     new_status = RV_VERIFIED if body.action == "accept" else RV_REJECTED
-    pending_fields = (await db.execute(
-        select(FieldValue).where(
-            FieldValue.document_id == doc.id, FieldValue.document_version == doc.current_version,
-            FieldValue.node_kind == "scalar", FieldValue.review_status == RV_PENDING)
-    )).scalars().all()
+    stmt = select(FieldValue).where(
+        FieldValue.document_id == doc.id, FieldValue.document_version == doc.current_version,
+        FieldValue.node_kind == "scalar", FieldValue.review_status == RV_PENDING)
+    if body.skip_new:
+        stmt = stmt.where(FieldValue.is_discovered.is_(False))
+    pending_fields = (await db.execute(stmt)).scalars().all()
 
     if not pending_fields:
         return {"count": 0, "review_status": new_status, "document_status": doc.processing_status,
@@ -640,6 +671,95 @@ async def bulk_review_extractions(
         "count": len(field_ids), "review_status": new_status,
         "document_status": doc.processing_status, "pending_remaining": remaining,
     }
+
+
+@router.post("/{document_id}/fields/suggest", summary="Suggest details for new fields before adding them to a type")
+async def suggest_new_field_details(
+    document_id: str,
+    body: FieldSuggestRequest,
+    user: User = Depends(require_reviewer),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Pre-fills the "add to document type" form for fields the AI found that
+    no type defines: a reusable name, a one-sentence description, a data type,
+    the best-fitting document type of *this* document, and -- when the fact is
+    really an existing field worded differently -- which one. Read-only; the
+    administrator reviews and edits everything before anything is saved."""
+    doc = await db.get(Document, document_id)
+    if not doc or not await permissions.can_read(db, user, doc.id):
+        raise HTTPException(404, "Document not found")
+
+    rows = (await db.execute(select(FieldValue).where(
+        FieldValue.id.in_(body.field_value_ids), FieldValue.document_id == doc.id,
+        FieldValue.document_version == doc.current_version, FieldValue.is_discovered.is_(True),
+        FieldValue.node_kind == "scalar"))).scalars().all()
+    if not rows:
+        raise HTTPException(404, "No new fields found for those ids")
+
+    types = (await db.execute(
+        select(DocumentType).join(document_type_links, document_type_links.c.document_type_id == DocumentType.id)
+        .where(document_type_links.c.document_id == doc.id).order_by(DocumentType.name))).scalars().all()
+    infos = []
+    for t in types:
+        schema = await db.get(TypeSchema, t.active_schema_id) if t.active_schema_id else None
+        infos.append(field_suggest.TypeInfo(
+            id=str(t.id), name=t.name, description=t.description or "",
+            fields=[{"key": f["key"], "name": f["name"], "description": f.get("description", ""),
+                     "data_type": f["data_type"]} for f in (schema.fields if schema else [])]))
+
+    by_id = {str(r.id): r for r in rows}
+    facts = [field_suggest.Fact(
+        id=str(r.id), name=r.field_name, value=r.raw_value or "", quote=r.source_text or "",
+        current_type_id=str(r.document_type_id) if r.document_type_id else "") for r in rows]
+    suggestions, used_ai = await asyncio.to_thread(field_suggest.suggest, facts, infos)
+    return {
+        "suggestions": suggestions, "ai": used_ai,
+        "document_types": [{"id": i.id, "name": i.name,
+                            "fields": [{"key": f["key"], "name": f["name"], "data_type": f["data_type"]}
+                                       for f in i.fields]} for i in infos],
+        "fields": [{"id": k, "name": r.field_name, "value": r.raw_value, "quote": r.source_text,
+                    "review_status": r.review_status} for k, r in by_id.items()],
+    }
+
+
+@router.post("/{document_id}/fields/promote", summary="Add new fields to a document type")
+async def promote_new_fields(
+    document_id: str,
+    body: PromoteFieldsRequest,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Turns discovered ("new") fields into real fields of one of the
+    document's types: appends them to that type's schema as a new version (or
+    maps them onto an existing field), converts this document's values, and
+    accepts them -- adding a field to a type is the acceptance. Administrators
+    only, because it edits a document type. All or nothing."""
+    doc = await db.get(Document, document_id)
+    if not doc or not await permissions.can_read(db, admin, doc.id):
+        raise HTTPException(404, "Document not found")
+
+    items = [field_promotion.PromoteItem(
+        field_value_id=str(i.field_value_id), name=i.name, description=i.description,
+        data_type=i.data_type, document_type_id=str(i.document_type_id), existing_key=i.existing_key)
+        for i in body.items]
+    try:
+        results = await field_promotion.promote_fields(db, admin, doc, items)
+    except field_promotion.PromoteError as e:
+        await db.rollback()
+        raise HTTPException(e.status, e.message)
+
+    remaining = await _flip_doc_status_on_pending_change(db, doc)
+    await audit.log_event(
+        db, tenant_id=admin.tenant_id, actor_id=admin.id, event_type=AUDIT_CONFIG_CHANGE,
+        object_type="document", object_id=doc.id,
+        detail={"action": "promote_fields",
+                "fields": [{"name": r["name"], "type": r["document_type_name"], "key": r["key"],
+                            "schema_version": r["schema_version"], "created": r["created_field"]}
+                           for r in results]},
+        ip_address=client_ip(request), commit=False)
+    await db.commit()
+    return {"promoted": results, "document_status": doc.processing_status, "pending_remaining": remaining}
 
 
 @router.post("/{document_id}/extractions/{field_value_id}/edit", summary="Directly correct a field's value")

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant, get_tenant_db, require_admin
 from app.core.config import settings
+from app.models.catalog import DocumentType
 from app.models.mgmt import Tenant as MgmtTenant
 from app.models.tenant import User
 from app.models.type_draft import (
@@ -52,6 +53,26 @@ async def create_draft(admin: User = Depends(require_admin), db: AsyncSession = 
     d = await tb.create_draft(db, admin)
     await db.commit()
     return await tb.draft_detail(db, d)
+
+
+@router.post("/from-type/{type_id}", summary="Start (or resume) editing an existing document type")
+async def edit_existing_type(type_id: str, admin: User = Depends(require_admin),
+                             db: AsyncSession = Depends(get_tenant_db)):
+    """Opens the same guided editor used to create a type, pre-filled from an
+    existing one and started at the fields step. Nothing changes on the type
+    until the draft is published, which then saves a new schema version. If this
+    admin already has an edit draft open for the type, that one is returned
+    (`reused: true`) so clicking Edit twice doesn't fork the work."""
+    try:
+        key = uuid.UUID(type_id)
+    except ValueError:
+        raise HTTPException(404, "Document type not found")
+    dt = await db.get(DocumentType, key)
+    if dt is None or dt.tenant_id != admin.tenant_id:
+        raise HTTPException(404, "Document type not found")
+    d, reused = await tb.create_edit_draft(db, admin, dt)
+    await db.commit()
+    return {**await tb.draft_detail(db, d), "reused": reused}
 
 
 @router.get("", summary="List drafts")
@@ -229,4 +250,7 @@ async def publish_draft(draft_id: str, admin: User = Depends(require_admin),
         dt = await tb.publish(db, d, admin)
     except tb.DraftError as e:
         _raise(e)
+    # `updated_at` is set by the database on change, which leaves it expired;
+    # reading an expired attribute while building the response would raise.
+    await db.refresh(dt)
     return {"document_type": DocumentTypeOut.model_validate(dt).model_dump(mode="json"), "draft_id": str(d.id)}

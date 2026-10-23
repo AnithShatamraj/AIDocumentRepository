@@ -60,6 +60,7 @@ class DocumentTypeOut(BaseModel):
     description: str
     is_enabled: bool
     active_schema_id: uuid.UUID | None = None
+    updated_at: dt.datetime | None = None
 
     class Config:
         from_attributes = True
@@ -149,10 +150,24 @@ class DocumentOut(BaseModel):
     processing_status: str
     owner_id: uuid.UUID
     created_at: dt.datetime
+    updated_at: dt.datetime
     tags: list[TagOut] = []
 
     class Config:
         from_attributes = True
+
+
+class DocumentTypeRef(BaseModel):
+    id: uuid.UUID
+    name: str
+
+
+class DocumentListItem(DocumentOut):
+    """A row of the documents list. Kept apart from `DocumentOut` because
+    `Document.document_types` is a lazy relationship: adding it to the shared
+    schema would make every `model_validate(doc)` trigger a lazy load, which
+    raises in async sessions. The list endpoint fills it from one batched query."""
+    document_types: list[DocumentTypeRef] = []
 
 
 class DocumentDetail(DocumentOut):
@@ -288,6 +303,27 @@ class BulkExtractionReview(BaseModel):
     """Accept or reject every field still pending_review on a document."""
 
     action: str  # accept | reject
+    # Leave "new" (discovered) fields alone. They can only be accepted by adding
+    # them to a document type, which is its own step (see PromoteFieldsRequest).
+    skip_new: bool = False
+
+
+class FieldSuggestRequest(BaseModel):
+    field_value_ids: list[uuid.UUID] = Field(min_length=1, max_length=30)
+
+
+class PromoteFieldItem(BaseModel):
+    field_value_id: uuid.UUID
+    name: str
+    description: str = ""
+    data_type: str = "string"
+    document_type_id: uuid.UUID
+    # Map onto this existing field of the type instead of adding a new one.
+    existing_key: str | None = None
+
+
+class PromoteFieldsRequest(BaseModel):
+    items: list[PromoteFieldItem] = Field(min_length=1, max_length=30)
 
 
 class ExtractionEdit(BaseModel):

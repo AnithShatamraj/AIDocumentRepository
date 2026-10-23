@@ -93,26 +93,56 @@ def test_stub_embeddings_deterministic_and_similar():
     assert dot(v1, similar) > dot(v1, unrelated)
 
 
-def _hit(n: int):
-    import uuid
+def test_summarize_strips_markdown_citations_and_tables():
+    from app.services.chat import SUMMARY_CHARS, _summarize
 
-    from app.services.search import Hit
+    md = ("Here is the comparison [1]:\n\n| City | Rent |\n|------|------|\n"
+          "| Pune | Rs. 14,000 [2] |\n\n**Note:** `Mumbai` differs.")
+    out = _summarize(md)
+    assert "[1]" not in out and "[2]" not in out
+    assert "|" not in out and "--" not in out and "**" not in out and "`" not in out
+    assert "Pune" in out and "14,000" in out
 
-    return Hit(chunk_id=uuid.UUID(int=n), document_id=uuid.UUID(int=0), document_name="d",
-               content="", page=1, anchor=None, section_title=None, score=0.0)
-
-
-def test_interleave_gives_each_query_a_slot_and_dedupes():
-    from app.services.chat import _interleave
-
-    main = [_hit(1), _hit(2), _hit(3)]
-    pune = [_hit(10), _hit(2)]      # chunk 2 is shared with the main list
-    out = [h.chunk_id.int for h in _interleave([main, pune], limit=10)]
-    assert out == [1, 10, 2, 3]     # round-robin, no duplicate of 2
+    long = _summarize("word " * 200)
+    assert len(long) <= SUMMARY_CHARS + 1 and long.endswith("…")
 
 
-def test_interleave_respects_limit():
-    from app.services.chat import _interleave
+def test_infer_data_type_from_a_value():
+    from app.ai.field_suggest import infer_data_type
 
-    out = _interleave([[_hit(i) for i in range(1, 6)], [_hit(i) for i in range(6, 11)]], limit=4)
-    assert [h.chunk_id.int for h in out] == [1, 6, 2, 7]
+    assert infer_data_type("Rs. 2152.00/-") == "currency"
+    assert infer_data_type("₹30,000") == "currency"
+    assert infer_data_type("12") == "integer"
+    assert infer_data_type("12.5") == "number"
+    assert infer_data_type("31/03/2017") == "date"
+    assert infer_data_type("Yes") == "boolean"
+    assert infer_data_type("Residential purpose only") == "string"
+    assert infer_data_type("") == "string"
+
+
+def test_suggestions_are_validated_against_the_real_types():
+    from app.ai.field_suggest import Fact, TypeInfo, _clean
+
+    types = [TypeInfo("t1", "Lease", "", [{"key": "license_fee", "name": "License Fee", "data_type": "currency"}]),
+             TypeInfo("t2", "Contract", "", [])]
+    fact = Fact("f1", "License Fee Amount", "Rs. 14000", "", "t1")
+    # An invented type id, an invalid data type and a made-up existing key all fall back safely.
+    out = _clean({"name": " Monthly   Rent ", "data_type": "money", "document_type_id": "nope",
+                  "existing_key": "ghost"}, fact, types)
+    assert out["name"] == "Monthly Rent"
+    assert out["data_type"] == "currency"          # inferred from the value
+    assert out["document_type_id"] == "t1"         # the fact's own type
+    assert out["existing_key"] is None
+    # ...but a real existing key is kept, and a same-named field is found without the model's help.
+    ok = _clean({"name": "License Fee", "document_type_id": "t1", "existing_key": "license_fee"}, fact, types)
+    assert ok["existing_key"] == "license_fee"
+    assert _clean({"name": "License fee"}, fact, types)["existing_key"] == "license_fee"
+
+
+def test_unique_key_avoids_collisions():
+    from app.services.field_promotion import unique_key
+
+    assert unique_key("Stamp Duty", set()) == "stamp_duty"
+    assert unique_key("Stamp Duty", {"stamp_duty"}) == "stamp_duty_2"
+    assert unique_key("Stamp Duty", {"stamp_duty", "stamp_duty_2"}) == "stamp_duty_3"
+    assert len(unique_key("x" * 80, {"x" * 63})) <= 63

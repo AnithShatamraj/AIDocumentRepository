@@ -472,3 +472,206 @@ button.tiny { padding: 3px 8px; font-size: 11px; }
 .md-table-wrap tbody tr:last-child td { border-bottom: none; }
 /* The bubble is tinted; the default row hover reads as a stray highlight. */
 .md-table-wrap tr:hover td { background: transparent; }
+
+/* ---- Shared small helpers ---- */
+.tiny-text { font-size: 12px; }
+.clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.nowrap { white-space: nowrap; }
+.clip-cell { max-width: 0; width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-link { color: inherit; display: block; }
+.tile-link:hover { text-decoration: none; }
+.tile-link:hover .card { border-color: var(--primary-2); }
+a.ghost-link {
+  background: transparent; color: var(--muted); border: 1px solid var(--border); padding: 7px 12px;
+  border-radius: 8px; font-weight: 600; font-size: 13px; white-space: nowrap;
+}
+a.ghost-link:hover { text-decoration: none; color: var(--text); background: var(--surface-2); }
+.field-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.search-panel { margin-bottom: 16px; }
+
+/* ---- Research list: fixed-size, clickable cards ---- */
+.research-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+.research-card {
+  height: 232px; display: flex; flex-direction: column; gap: 8px; cursor: pointer; overflow: hidden;
+}
+.research-card:hover, .research-card:focus-visible { border-color: var(--primary-2); outline: none; }
+.research-card-title { font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.research-card-summary {
+  font-size: 13px; line-height: 1.5; color: var(--text); flex: 1; min-height: 0;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.research-card-docs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; max-height: 62px; overflow: hidden; }
+.research-card-docs .cite { max-width: calc(50% - 4px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; }
+.research-card-foot { display: flex; justify-content: space-between; font-size: 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+
+/* ---- Document types: fixed-size cards + detail popup ---- */
+.type-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.type-card { height: 196px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; overflow: hidden; }
+.type-card:hover, .type-card:focus-visible { border-color: var(--primary-2); outline: none; }
+.type-card.disabled { opacity: 0.7; }
+.type-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.type-card-name { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.type-card-desc {
+  font-size: 13px; line-height: 1.45; height: calc(1.45em * 3); flex: none;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.type-card-foot { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; flex: none; margin-top: auto; }
+.modal-card.sm { height: auto; max-height: 86vh; max-width: 640px; }
+
+/* Rename/delete on a research card (reusing the history row's small icon buttons). */
+.research-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.research-card-head .research-card-title { flex: 1; min-width: 0; }
+.research-card-actions { display: flex; flex: none; }
+.research-card:hover .hist-act, .research-card:focus-within .hist-act { opacity: 1; }
+
+/* ---- Documents: column filters + multi-file upload ---- */
+.th-inner { display: inline-flex; align-items: center; gap: 6px; }
+.col-filter { position: relative; display: inline-flex; }
+.filter-btn {
+  background: transparent; color: var(--muted); border: 1px solid transparent; padding: 3px 5px;
+  border-radius: 6px; line-height: 0; font-weight: 400;
+}
+.filter-btn:hover { background: var(--surface-2); color: var(--text); }
+.filter-btn.on { color: var(--primary-2); border-color: var(--primary-2); background: var(--surface-2); }
+.filter-pop {
+  position: absolute; top: calc(100% + 6px); z-index: 30; width: 232px; padding: 12px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px var(--shadow); cursor: default;
+  /* The header cell is small uppercase muted text; the popover is not. */
+  text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 400; color: var(--text);
+}
+.filter-pop.left { left: 0; }
+.filter-pop.right { right: 0; }
+.filter-pop-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 8px; }
+.filter-pop select, .filter-pop input[type="text"], .filter-pop input:not([type]), .filter-pop input[type="date"] { font-size: 13px; padding: 6px 8px; }
+.filter-pop label { margin-bottom: 4px; }
+.filter-pop-foot { display: flex; justify-content: space-between; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.check-list { max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.filter-pop .check-row { display: flex; align-items: center; gap: 8px; margin: 0; padding: 4px 4px; border-radius: 6px;
+  font-size: 13px; color: var(--text); cursor: pointer; }
+.filter-pop .check-row:hover { background: var(--surface-2); }
+.filter-pop .check-row input { width: auto; padding: 0; }
+.filter-summary { display: flex; align-items: center; gap: 12px; font-size: 12px; margin-bottom: 8px; }
+.doc-table thead tr:hover th { background: transparent; }
+.file-list { margin-top: 12px; max-height: 150px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+.file-list-row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 10px; font-size: 13px; }
+.file-list-row + .file-list-row { border-top: 1px solid var(--border); }
+
+/* ---- Date range filter: presets + calendar ---- */
+.filter-pop.wide { width: 292px; }
+.date-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.date-presets button.on, .cal-day.edge { background: var(--primary); color: #fff; border-color: var(--primary); }
+.date-summary { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.cal-head strong { font-size: 13px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.cal-dow { text-align: center; font-size: 11px; color: var(--muted); padding: 2px 0; }
+.cal-day {
+  background: transparent; color: var(--text); border: 1px solid transparent; padding: 0; height: 30px;
+  border-radius: 6px; font-weight: 400; font-size: 12px;
+}
+.cal-day:hover { background: var(--surface-2); }
+.cal-day.today { border-color: var(--border); }
+.cal-day.in-range { background: var(--surface-2); border-radius: 0; }
+.cal-day.edge:hover { background: var(--primary-2); }
+
+/* Document header: small action buttons never wrap onto a second line. */
+.page-head .row.muted button, .page-head .row.muted .pill { white-space: nowrap; }
+.page-head .row.muted { flex-wrap: wrap; row-gap: 4px; }
+
+/* Document types + tags on one row: two groups that wrap as whole groups. */
+.meta-row { column-gap: 0; row-gap: 6px; }
+.meta-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.meta-group + .meta-group { margin-left: 16px; padding-left: 16px; border-left: 1px solid var(--border); }
+.meta-tags { flex: 1; min-width: 200px; }
+/* Wrapped onto its own line there is nothing to divide it from. */
+@media (max-width: 1100px) { .meta-group + .meta-group { border-left: none; margin-left: 0; padding-left: 0; } }
+
+/* ---- Extracted data: sections per document type + new fields ---- */
+.fs-toolbar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.fs-section { border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; background: var(--surface); }
+.fs-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; user-select: none; flex-wrap: wrap; }
+.fs-head:hover { background: var(--surface-2); border-radius: var(--radius); }
+.fs-head .chev { color: var(--muted); font-size: 11px; width: 12px; flex: none; }
+.fs-head strong { font-size: 13px; }
+.fs-actions { margin-left: auto; }
+.fs-body { padding: 2px 12px 10px; }
+.fs-note { font-size: 12px; line-height: 1.5; margin: 2px 0 10px; }
+.fs-notice { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; font-size: 12px;
+  padding: 8px 10px; margin-bottom: 10px; border-radius: 8px; background: var(--surface-2); border-left: 3px solid var(--success); }
+.pill.pending { color: var(--warn); border-color: var(--warn); }
+button.promote-btn { padding: 4px 10px; font-size: 12px; }
+
+/* ---- Add-to-type dialog ---- */
+.modal-card.promote-card { max-width: 760px; height: auto; max-height: 88vh; display: flex; flex-direction: column; }
+.promote-loading { padding: 28px 4px; text-align: center; }
+.promote-rows { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding-right: 2px; }
+.promote-row { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; background: var(--bg); }
+.promote-row.off { opacity: 0.55; }
+.promote-check { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); cursor: pointer; }
+.promote-check input { width: auto; }
+.promote-value { margin: 4px 0 0 24px; font-size: 12px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; }
+.promote-form { margin: 10px 0 0 24px; }
+.promote-form .field { margin-bottom: 10px; }
+.promote-grid { display: grid; grid-template-columns: 1fr 170px; gap: 10px; }
+.promote-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+/* ---- Extracted data: each document type is its own coloured block ----
+   A tinted header band with a thick accent bar, a hue per type, and a header
+   that stays put while that type's fields scroll underneath -- so you always
+   know which type you are in, and one type never looks like the next.
+   Each hue is three values: band background, accent bar, header text. Dark and
+   light themes are tuned separately (the dark ones are deep, desaturated
+   backgrounds with a bright bar; the light ones are pale washes with a strong
+   bar and dark text) so contrast holds in both. */
+.fs-section {
+  --fs-bg: #1e2d57; --fs-bar: #6b93ff; --fs-fg: #dce6ff;
+  border: 1px solid color-mix(in srgb, var(--fs-bar) 45%, var(--border));
+}
+.fs-section[data-hue="0"] { --fs-bg: #1e2d57; --fs-bar: #6b93ff; --fs-fg: #dce6ff; }  /* blue */
+.fs-section[data-hue="1"] { --fs-bg: #12403d; --fs-bar: #2fc2b0; --fs-fg: #d3f5f0; }  /* teal */
+.fs-section[data-hue="2"] { --fs-bg: #46223d; --fs-bar: #e56fb5; --fs-fg: #ffdcef; }  /* rose */
+.fs-section[data-hue="3"] { --fs-bg: #31275c; --fs-bar: #a590ff; --fs-fg: #e7e1ff; }  /* violet */
+.fs-section[data-hue="other"] { --fs-bg: #2a3040; --fs-bar: #8591ad; --fs-fg: #e1e6f2; }  /* slate */
+/* New fields need a decision, so they get the attention colour, and a dashed edge. */
+.fs-section.is-new { --fs-bg: #3f3214; --fs-bar: #f2b64c; --fs-fg: #ffeab8; border-style: dashed; }
+
+:root[data-theme="light"] .fs-section[data-hue="0"] { --fs-bg: #dfe8ff; --fs-bar: #3b66e0; --fs-fg: #1b3688; }
+:root[data-theme="light"] .fs-section[data-hue="1"] { --fs-bg: #d3f1ec; --fs-bar: #11998a; --fs-fg: #0a4640; }
+:root[data-theme="light"] .fs-section[data-hue="2"] { --fs-bg: #fbdff0; --fs-bar: #c23d93; --fs-fg: #6a1a4c; }
+:root[data-theme="light"] .fs-section[data-hue="3"] { --fs-bg: #e7e1ff; --fs-bar: #6a4fe0; --fs-fg: #392a8c; }
+:root[data-theme="light"] .fs-section[data-hue="other"] { --fs-bg: #e3e8f2; --fs-bar: #5d6b85; --fs-fg: #2a3550; }
+:root[data-theme="light"] .fs-section.is-new { --fs-bg: #fff0c9; --fs-bar: #c68a0e; --fs-fg: #654505; }
+
+.fs-head {
+  position: sticky; top: 0; z-index: 3;
+  background: var(--fs-bg); color: var(--fs-fg);
+  border-left: 5px solid var(--fs-bar); border-radius: calc(var(--radius) - 2px) calc(var(--radius) - 2px) 0 0;
+  padding: 10px 12px;
+}
+.fs-head:hover { background: color-mix(in srgb, var(--fs-bar) 22%, var(--fs-bg)); border-radius: calc(var(--radius) - 2px) calc(var(--radius) - 2px) 0 0; }
+.fs-head strong { font-size: 14px; color: var(--fs-fg); }
+.fs-head .chev { color: var(--fs-bar); }
+.fs-head .pill { background: color-mix(in srgb, var(--fs-bar) 18%, transparent); border-color: color-mix(in srgb, var(--fs-bar) 55%, transparent); color: var(--fs-fg); }
+.fs-head .pill.pending { color: var(--fs-fg); }
+/* A section collapsed to just its band keeps rounded corners. */
+.fs-section > .fs-head:last-child { border-radius: calc(var(--radius) - 2px); }
+.fs-body { border-left: 5px solid color-mix(in srgb, var(--fs-bar) 35%, transparent); padding-top: 8px; }
+
+/* ---- Editing an existing type in the wizard ---- */
+.stale-banner { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-bottom: 12px; font-size: 13px; border-left: 4px solid var(--warn); }
+
+/* ---- Document page: which side the content is on ----
+   The content (summary + extracted data) sits on the left by default and the
+   document on the right. The DOM order is unchanged (document first), so the
+   swap is only a reversal of the row. Stacked on narrow screens, the content
+   goes above the document. */
+.doc-workspace.content-left { flex-direction: row-reverse; }
+@media (max-width: 1100px) {
+  .doc-workspace.content-left { flex-direction: column-reverse; }
+}
+/* Header actions keep their labels on one line (they wrapped to two at narrow widths). */
+.doc-page .page-head > .row button { white-space: nowrap; }
