@@ -30,7 +30,7 @@ import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.ai import type_builder as ai
@@ -38,7 +38,7 @@ from app.ai.registry import is_offline
 from app.ai.types import LLMResult
 from app.core.logging import get_logger
 from app.core.tenant_db import get_tenant_async_engine
-from app.models.catalog import DocumentType
+from app.models.catalog import DocumentType, TypeSchema
 from app.models.constants import AUDIT_CONFIG_CHANGE
 from app.models.ops import CostRecord
 from app.models.type_draft import (
@@ -340,13 +340,26 @@ def draft_summary(d: DocumentTypeDraft, sample_count: int = 0) -> dict:
         "created_by": str(d.created_by) if d.created_by else None,
         "updated_at": d.updated_at.isoformat(), "created_at": d.created_at.isoformat(),
         "published_type_id": str(d.published_type_id) if d.published_type_id else None,
+        "edits_type_id": str(d.edits_type_id) if d.edits_type_id else None,
+        "base_schema_version": d.base_schema_version,
     }
 
 
 async def draft_detail(db: AsyncSession, d: DocumentTypeDraft) -> dict:
     samples = await list_samples(db, d.id)
     ready = [s for s in samples if _sample_status(s) == SAMPLE_READY]
+    edit_info: dict = {}
+    if d.edits_type_id and d.status == DRAFT_ACTIVE:
+        # Is the type still where this draft started? If not, saving would
+        # overwrite whatever changed it, so the page warns before the admin
+        # does the work rather than after.
+        dt_ = await db.get(DocumentType, d.edits_type_id)
+        schema = await db.get(TypeSchema, dt_.active_schema_id) if dt_ and dt_.active_schema_id else None
+        current = schema.version if schema else None
+        edit_info = {"edits_type_name": dt_.name if dt_ else None, "type_schema_version": current,
+                     "stale": dt_ is None or current != d.base_schema_version}
     return {
+        **edit_info,
         **draft_summary(d, len(samples)),
         "name_confirmed": d.name_confirmed, "description": d.description,
         "description_confirmed": d.description_confirmed, "fields": d.fields or [],
@@ -370,6 +383,41 @@ async def create_draft(db: AsyncSession, user) -> DocumentTypeDraft:
     await db.refresh(d)
     return d
 
+
+
+async def create_edit_draft(db: AsyncSession, user, dt: DocumentType) -> tuple[DocumentTypeDraft, bool]:
+    """A draft for editing an existing type, opened at the fields step with the
+    type's current name, description and fields already in place. Returns
+    `(draft, reused)`: an admin who already has an edit draft open for this type
+    gets that one back, so clicking Edit twice never forks the work."""
+    existing = (await db.execute(
+        select(DocumentTypeDraft).where(
+            DocumentTypeDraft.tenant_id == dt.tenant_id, DocumentTypeDraft.edits_type_id == dt.id,
+            DocumentTypeDraft.status == DRAFT_ACTIVE)
+        .order_by(DocumentTypeDraft.updated_at.desc()).limit(1))).scalars().first()
+    if existing is not None:
+        return existing, True
+
+    schema = await db.get(TypeSchema, dt.active_schema_id) if dt.active_schema_id else None
+    d = DocumentTypeDraft(
+        tenant_id=dt.tenant_id, created_by=user.id, stage=STAGE_FIELDS,
+        name=dt.name, name_confirmed=True,
+        description=dt.description or "", description_confirmed=True,
+        fields=[dict(f) for f in (schema.fields if schema else [])], last_validation={},
+        edits_type_id=dt.id, base_schema_version=schema.version if schema else None)
+    db.add(d)
+    await db.flush()
+    await add_message(
+        db, d, "assistant",
+        f"You're editing **{dt.name}**"
+        + (f" (currently version {schema.version})" if schema else "")
+        + ". Change the fields in the panel on the right, or tell me what to change "
+          "(for example “add a due date” or “split address into street and city”).\n\n"
+          "Nothing is saved to the document type until you press **Save changes**. "
+          "Upload a sample document if you'd like to test the extraction first.",
+        {"kind": "edit_welcome", "actions": _actions("upload_samples")})
+    await db.refresh(d)
+    return d, False
 
 def touch(draft: DocumentTypeDraft) -> None:
     """Stamp updated_at in Python. The column's onupdate is a SQL expression,
@@ -799,6 +847,67 @@ async def run_validation(db: AsyncSession, draft: DocumentTypeDraft, user, sampl
 
 
 # ------------------------------------------------------------------- publish
+async def _save_edit(db: AsyncSession, draft: DocumentTypeDraft, user, name: str, fields: list[dict]) -> DocumentType:
+    """Publish for a draft that edits an existing type: update its name and
+    description, and add a new schema version if (and only if) the fields
+    changed. Field trees are immutable per version, so documents already
+    processed keep the version they were extracted under."""
+    dt_ = await db.get(DocumentType, draft.edits_type_id) if draft.edits_type_id else None
+    if dt_ is None or dt_.tenant_id != draft.tenant_id:
+        raise DraftError(409, "The document type this draft was editing no longer exists. "
+                              "Discard the draft and start again.")
+    schema = await db.get(TypeSchema, dt_.active_schema_id) if dt_.active_schema_id else None
+    current_version = schema.version if schema else None
+    if current_version != draft.base_schema_version:
+        raise DraftError(
+            409, f"“{dt_.name}” has changed since you started editing (it is now version {current_version}; "
+                 f"you started from version {draft.base_schema_version}). Saving would overwrite that. "
+                 "Discard this draft and click Edit again to start from the latest version.")
+    clash = (await db.execute(select(DocumentType.id).where(
+        DocumentType.tenant_id == draft.tenant_id, func.lower(DocumentType.name) == name.lower(),
+        DocumentType.id != dt_.id))).first()
+    if clash:
+        raise DraftError(409, f"A document type named '{name}' already exists — choose a different name.")
+
+    # Compare like with like: the stored tree may predate defaults the validator adds,
+    # which would otherwise make an untouched draft look changed.
+    try:
+        baseline = (fieldsvc.dump_schema(fieldsvc.validate_schema(fieldsvc.ensure_keys(schema.fields)))
+                    if schema else [])
+    except fieldsvc.SchemaError:
+        baseline = list(schema.fields) if schema else []
+    fields_changed = fields != baseline
+    old_name = dt_.name
+    dt_.name = name
+    dt_.description = draft.description.strip()[:MAX_DESCRIPTION_STORED]
+    new_version = current_version
+    if fields_changed:
+        new_version = (await db.execute(
+            select(func.coalesce(func.max(TypeSchema.version), 0)).where(
+                TypeSchema.document_type_id == dt_.id))).scalar() + 1
+        new_schema = TypeSchema(tenant_id=draft.tenant_id, document_type_id=dt_.id, version=new_version,
+                                fields=fields, created_by=user.id)
+        db.add(new_schema)
+        await db.flush()
+        dt_.active_schema_id = new_schema.id
+
+    draft.status, draft.published_type_id, draft.name = DRAFT_PUBLISHED, dt_.id, name
+    await add_message(
+        db, draft, "assistant",
+        f"Saved **{name}**. " + (f"Its fields are now version {new_version}; documents already processed keep "
+                                 f"the version they were read with, and new or reprocessed ones use this one."
+                                 if fields_changed else "The fields were unchanged, so no new version was created."),
+        {"kind": "published"})
+    await audit.log_event(
+        db, tenant_id=draft.tenant_id, actor_id=user.id, event_type=AUDIT_CONFIG_CHANGE,
+        object_type="document_type", object_id=dt_.id,
+        detail={"action": "edit_ai_draft", "draft_id": str(draft.id), "name": name, "renamed_from": old_name
+                if old_name != name else None, "schema_version": new_version, "fields_changed": fields_changed},
+        commit=False)
+    await db.commit()
+    return dt_
+
+
 async def publish(db: AsyncSession, draft: DocumentTypeDraft, user) -> DocumentType:
     if draft.status != DRAFT_ACTIVE:
         raise DraftError(409, "This draft has already been published.")
@@ -808,6 +917,8 @@ async def publish(db: AsyncSession, draft: DocumentTypeDraft, user) -> DocumentT
     if not name:
         raise DraftError(422, "Give the document type a name.")
     fields = fieldsvc.dump_schema(_strict_fields(draft))
+    if draft.edits_type_id is not None:
+        return await _save_edit(db, draft, user, name, fields)
     try:
         dt_ = await create_document_type(
             db, tenant_id=draft.tenant_id, created_by=user.id, name=name,

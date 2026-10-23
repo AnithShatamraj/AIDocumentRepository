@@ -60,6 +60,7 @@ class DocumentTypeOut(BaseModel):
     description: str
     is_enabled: bool
     active_schema_id: uuid.UUID | None = None
+    updated_at: dt.datetime | None = None
 
     class Config:
         from_attributes = True
