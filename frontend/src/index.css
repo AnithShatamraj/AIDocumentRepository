@@ -473,17 +473,6 @@ button.tiny { padding: 3px 8px; font-size: 11px; }
 /* The bubble is tinted; the default row hover reads as a stray highlight. */
 .md-table-wrap tr:hover td { background: transparent; }
 
-/* ---- Navigation: Administration group ---- */
-.nav .nav-group {
-  display: flex; width: 100%; justify-content: space-between; align-items: center;
-  background: transparent; color: var(--muted); font-weight: 500; font-size: 14px;
-  padding: 9px 12px; border-radius: 8px; margin-bottom: 2px; text-align: left;
-}
-.nav .nav-group:hover, .nav .nav-group.current { background: var(--surface-2); color: var(--text); }
-.nav .nav-group .chev { font-size: 11px; }
-.nav-sub { margin: 0 0 4px 14px; padding-left: 8px; border-left: 1px solid var(--border); }
-.nav-sub a { padding: 7px 12px; font-size: 13px; }
-
 /* ---- Shared small helpers ---- */
 .tiny-text { font-size: 12px; }
 .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
