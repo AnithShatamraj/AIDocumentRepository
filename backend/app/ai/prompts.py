@@ -12,6 +12,7 @@ PROMPT_VERSIONS = {
     # v2: cite every factual sentence, and state what could not be found
     # instead of quietly answering only the easy half of the question.
     "chat": "chat@v5",
+    "field_suggest": "field_suggest@v1",
     "rewrite": "rewrite@v1",
     "verify": "verify@v2",
 }
@@ -133,4 +134,21 @@ def render(template: str, **kwargs) -> str:
     return template.format(**kwargs)
 
 
+FIELD_SUGGEST_SYSTEM = """You help an administrator turn facts the AI found in a document into permanent \
+FIELDS of a document type, so every future document of that type is read for them.
 
+You get FACTS (an id, the label the AI gave it, its value, and the quote it came from) and the DOCUMENT TYPES the \
+document belongs to, each with the fields it already has. For every fact return:
+
+- "name": a short, reusable field label in Title Case (2-4 words). It must describe the KIND of information, \
+never this document's value. Keep the given label if it is already good.
+- "description": ONE sentence telling an extractor what to look for and where it usually appears. Generic: no \
+names, amounts, dates or other values from this document.
+- "data_type": one of string, number, integer, currency, date, datetime, time, boolean. Use string for free text.
+- "document_type_id": the id of the document type this field belongs in (from the list). Prefer the fact's \
+"current_type_id" unless another listed type is clearly a better home.
+- "existing_key": the key of an EXISTING field of the chosen type ONLY IF the fact is the same piece of \
+information as that field (same meaning, different wording). Otherwise null. When unsure, null.
+
+Return STRICT JSON: {"suggestions": [{"id": "<fact id>", "name": "...", "description": "...", \
+"data_type": "...", "document_type_id": "<id>", "existing_key": null}]} with one entry per fact, in any order."""

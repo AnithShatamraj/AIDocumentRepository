@@ -6,7 +6,10 @@ import { StatusBadge } from "../components/StatusBadge";
 import { CollapsibleSection } from "../components/CollapsibleSection";
 import { useLayoutNav } from "../components/Layout";
 import { PdfViewer, Highlight } from "../components/PdfViewer";
-import { FieldTree, FieldNode } from "../components/FieldTree";
+import { FieldNode } from "../components/FieldTree";
+import { FieldSections } from "../components/FieldSections";
+import { PromoteDialog, PromoteResult } from "../components/PromoteDialog";
+import { useAuth } from "../auth/AuthContext";
 import { TagEditor } from "../components/TagEditor";
 
 const STAGE_LABEL: Record<string, string> = {
@@ -25,6 +28,11 @@ const PANEL_MAX = 720;
 export function DocumentDetail() {
   const { id } = useParams();
   const qc = useQueryClient();
+  const { user } = useAuth();
+  // Adding a field to a document type edits the type, which is admin-only.
+  const isAdmin = user?.role === "administrator";
+  const [promote, setPromote] = useState<{ nodes: FieldNode[]; thenAcceptRest: boolean } | null>(null);
+  const [notice, setNotice] = useState("");
   const [viewerUrl, setViewerUrl] = useState<string>("");
   const [highlight, setHighlight] = useState<Highlight | null>(null);
   const [hlNonce, setHlNonce] = useState(0);
@@ -222,9 +230,48 @@ export function DocumentDetail() {
     }
   }
 
+  /** New (discovered) fields still waiting for a decision, one per distinct
+   * fact -- the same fact is often found once per document type. */
+  function pendingNewFields(): FieldNode[] {
+    const seen = new Set<string>();
+    const out: FieldNode[] = [];
+    for (const f of (doc?.fields || []) as FieldNode[]) {
+      if (f.is_discovered && f.review_status === "pending_review" && !seen.has(f.field_key)) {
+        seen.add(f.field_key);
+        out.push(f);
+      }
+    }
+    return out;
+  }
+
+  /** Accept everything pending except new fields: those can only be accepted by
+   * giving them a document type. */
+  async function acceptRest() {
+    setBulkBusy(true);
+    try {
+      await api.post(`/api/documents/${id}/extractions/bulk-review`, { action: "accept", skip_new: true });
+      await refreshAfterReview();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   async function bulkReview(action: "accept" | "reject") {
-    const verb = action === "accept" ? "Accept" : "Reject";
-    if (!window.confirm(`${verb} all remaining pending fields on this document?`)) return;
+    if (action === "accept") {
+      const fresh = pendingNewFields();
+      // Administrators decide where the new fields go first; the rest is accepted after.
+      if (fresh.length && isAdmin) {
+        setPromote({ nodes: fresh, thenAcceptRest: true });
+        return;
+      }
+      const left = fresh.length
+        ? ` The ${fresh.length} new field${fresh.length === 1 ? "" : "s"} will be left for an administrator to add to a document type.`
+        : "";
+      if (!window.confirm(`Accept all remaining pending fields on this document?${left}`)) return;
+      await acceptRest();
+      return;
+    }
+    if (!window.confirm("Reject all remaining pending fields on this document?")) return;
     setBulkBusy(true);
     try {
       await api.post(`/api/documents/${id}/extractions/bulk-review`, { action });
@@ -232,6 +279,24 @@ export function DocumentDetail() {
     } finally {
       setBulkBusy(false);
     }
+  }
+
+  async function onPromoted(results: PromoteResult[]) {
+    const thenRest = promote?.thenAcceptRest;
+    setPromote(null);
+    const added = results.filter((r) => r.created_field);
+    const mapped = results.length - added.length;
+    const types = [...new Set(results.map((r) => r.document_type_name))].join(", ");
+    setNotice(
+      [added.length && `Added ${added.length} field${added.length === 1 ? "" : "s"} to ${types}`,
+       mapped && `${mapped} mapped to existing field${mapped === 1 ? "" : "s"}`]
+        .filter(Boolean).join(" · ") +
+        (added.length ? ". Reprocess other documents of this type to extract it there too." : ".")
+    );
+    qc.invalidateQueries({ queryKey: ["document-types"] });
+    qc.invalidateQueries({ queryKey: ["document-type-detail"] });
+    if (thenRest) await acceptRest();
+    else await refreshAfterReview();
   }
 
   async function saveTags(names: string[]) {
@@ -438,19 +503,24 @@ export function DocumentDetail() {
               )
             }
           >
-            {(doc.fields || []).length === 0 ? (
-              <div className="muted">No fields extracted yet.</div>
-            ) : (
-              <FieldTree
-                nodes={doc.fields}
-                isPdf={isPdf}
-                reviewing={reviewing}
-                onJump={jumpToField}
-                onReview={reviewField}
-                onEdit={editField}
-                onDelete={deleteItem}
-              />
+            {notice && (
+              <div className="fs-notice">
+                <span>{notice}</span>
+                <button className="ghost tiny" onClick={() => setNotice("")}>✕</button>
+              </div>
             )}
+            <FieldSections
+              fields={(doc.fields || []) as FieldNode[]}
+              docTypes={(doc.document_types || []).map((t: any) => ({ id: t.id, name: t.name }))}
+              isPdf={isPdf}
+              reviewing={reviewing}
+              onJump={jumpToField}
+              onReview={reviewField}
+              onEdit={editField}
+              onDelete={deleteItem}
+              canPromote={isAdmin}
+              onPromote={(nodes) => setPromote({ nodes, thenAcceptRest: false })}
+            />
           </CollapsibleSection>
 
           {/* Only while it matters: running, queued, or something went wrong.
@@ -471,6 +541,20 @@ export function DocumentDetail() {
           )}
         </div>
       </div>
+
+      {promote && (
+        <PromoteDialog
+          docId={id!}
+          nodes={promote.nodes}
+          docTypes={(doc.document_types || []).map((t: any) => ({ id: t.id, name: t.name }))}
+          alternative={promote.thenAcceptRest
+            ? { label: "Accept the rest, leave these as new", onClick: () => { setPromote(null); void acceptRest(); } }
+            : undefined}
+          onClose={() => setPromote(null)}
+          onDone={onPromoted}
+        />
+      )}
+
       {/* Processing details: out of the side panel once a document is done. */}
       {detailsOpen && (
         <div className="modal-overlay" onClick={() => setDetailsOpen(false)}>

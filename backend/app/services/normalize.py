@@ -30,6 +30,12 @@ class Normalized:
         self.value_currency = currency
         self.ok = ok
 
+# Normalizer value types, keyed by a schema field's data_type.
+NORMALIZER_TYPE = {
+    "string": VT_TEXT, "number": VT_NUMERIC, "integer": VT_NUMERIC, "currency": VT_CURRENCY,
+    "date": VT_DATE, "datetime": VT_DATE, "time": VT_TEXT, "boolean": VT_TEXT,
+}
+
 
 def _parse_date(raw: str) -> dt.date | None:
     raw = raw.strip().rstrip(".")

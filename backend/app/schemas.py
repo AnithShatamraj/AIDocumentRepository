@@ -303,6 +303,27 @@ class BulkExtractionReview(BaseModel):
     """Accept or reject every field still pending_review on a document."""
 
     action: str  # accept | reject
+    # Leave "new" (discovered) fields alone. They can only be accepted by adding
+    # them to a document type, which is its own step (see PromoteFieldsRequest).
+    skip_new: bool = False
+
+
+class FieldSuggestRequest(BaseModel):
+    field_value_ids: list[uuid.UUID] = Field(min_length=1, max_length=30)
+
+
+class PromoteFieldItem(BaseModel):
+    field_value_id: uuid.UUID
+    name: str
+    description: str = ""
+    data_type: str = "string"
+    document_type_id: uuid.UUID
+    # Map onto this existing field of the type instead of adding a new one.
+    existing_key: str | None = None
+
+
+class PromoteFieldsRequest(BaseModel):
+    items: list[PromoteFieldItem] = Field(min_length=1, max_length=30)
 
 
 class ExtractionEdit(BaseModel):
