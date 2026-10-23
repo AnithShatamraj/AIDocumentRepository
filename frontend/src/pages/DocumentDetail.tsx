@@ -29,6 +29,7 @@ export function DocumentDetail() {
   const [highlight, setHighlight] = useState<Highlight | null>(null);
   const [hlNonce, setHlNonce] = useState(0);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [reviewing, setReviewing] = useState<Record<string, boolean>>({});
   const [bulkBusy, setBulkBusy] = useState(false);
   const [tagErr, setTagErr] = useState("");
@@ -45,7 +46,6 @@ export function DocumentDetail() {
   // explicitly overrides it.
   const [summarySectionOpen, setSummarySectionOpen] = useState(true);
   const [extractedOpen, setExtractedOpen] = useState(true);
-  const [classificationsOpen, setClassificationsOpen] = useState(false);
   const [timelineOverride, setTimelineOverride] = useState<boolean | null>(null);
 
   // Focus mode: collapse the nav sidebar + every side-panel section except
@@ -66,7 +66,6 @@ export function DocumentDetail() {
         setNavCollapsed(true);
         setPanelW(PANEL_MAX);
         setSummarySectionOpen(false);
-        setClassificationsOpen(false);
         setTimelineOverride(false);
         setExtractedOpen(true);
       } else {
@@ -118,13 +117,18 @@ export function DocumentDetail() {
       .catch(() => setViewerUrl(""));
   }, [id, isPdf, doc?.current_version]);
 
-  // ESC closes the summary modal.
+  // ESC closes whichever modal is open.
   useEffect(() => {
-    if (!summaryOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setSummaryOpen(false);
+    if (!summaryOpen && !detailsOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setSummaryOpen(false);
+        setDetailsOpen(false);
+      }
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [summaryOpen]);
+  }, [summaryOpen, detailsOpen]);
 
   // Splitter drag (pointer events cover mouse + touch): resize the right
   // panel against the workspace's right edge.
@@ -272,7 +276,46 @@ export function DocumentDetail() {
       0
     );
   const pendingCount = countPending(doc.fields || []);
-  const timelineOpen = timelineOverride ?? doc.processing_status === "processing";
+  // The timeline earns panel space only while the document is being processed or
+  // has a problem. `needs_review` counts as finished: processing is done, the
+  // reviewer's work is the extracted data.
+  const failed = doc.processing_status === "failed" || (pipeline?.stages || []).some((s: any) => s.status === "failed");
+  const inProgress = ["pending", "processing"].includes(doc.processing_status);
+  const timelineNeeded = inProgress || failed;
+  const timelineOpen = timelineOverride ?? timelineNeeded;
+  // Stage list + run totals, shown in the side panel while processing and in the
+  // "Processing details" popup afterwards.
+  const timelineBody = (
+    <>
+      <div className="timeline">
+        {(pipeline?.stages || []).map((s: any) => (
+          <div className="stage" key={s.name}>
+            <span className={`dot ${s.status}`} />
+            <div style={{ flex: 1 }}>
+              <div className="spread">
+                <span>{STAGE_LABEL[s.name] || s.name}</span>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {s.status}
+                  {s.latency_ms != null ? ` · ${s.latency_ms}ms` : ""}
+                  {s.cost_usd ? ` · $${s.cost_usd.toFixed(4)}` : ""}
+                </span>
+              </div>
+              {s.error_message && <div className="err" style={{ fontSize: 12 }}>{s.error_message}</div>}
+            </div>
+          </div>
+        ))}
+        {(!pipeline?.stages || pipeline.stages.length === 0) && (
+          <div className="muted">No pipeline run yet.</div>
+        )}
+      </div>
+      {pipeline?.run && (
+        <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+          Run cost ${pipeline.run.total_cost_usd?.toFixed(4)} · {pipeline.run.total_tokens} tokens
+        </div>
+      )}
+    </>
+  );
+
 
   return (
     <div className={`doc-page${focusMode ? " focus" : ""}`}>
@@ -284,14 +327,40 @@ export function DocumentDetail() {
             <span>{doc.file_type?.toUpperCase()} · v{doc.current_version}</span>
             {parser && <span className="pill">{parser}</span>}
             {ocrUsed && <span className="pill">OCR</span>}
-            {doc.document_types?.map((c: any) => <span key={c.id} className="pill">{c.name}</span>)}
+            {!timelineNeeded && pipeline?.run && (
+              <button className="ghost tiny" onClick={() => setDetailsOpen(true)}
+                      title="Stage timings, cost and tokens for the last processing run">
+                Processing details
+              </button>
+            )}
           </div>
-          <div className="tag-row">
-            <span className="muted tag-label">Tags</span>
-            <TagEditor
-              value={(doc.tags || []).map((t: any) => t.name)}
-              onChange={saveTags}
-            />
+          {/* Document types and tags share one row to leave the height to the
+              document. Types come first; the hover text keeps what the old
+              Classifications section showed: how sure the AI was, or that a
+              person set it. */}
+          <div className="tag-row meta-row">
+            <div className="meta-group">
+              <span className="muted tag-label">Document types</span>
+              {(doc.document_types || []).length === 0 && (
+                <span className="muted" style={{ fontSize: 13 }}>
+                  {inProgress ? "Classifying…" : "Not classified"}
+                </span>
+              )}
+              {(doc.document_types || []).map((t: any) => {
+                const c = (doc.classifications || []).find((x: any) => x.label === t.name);
+                const hint = !c ? undefined
+                  : c.source === "human" ? "Set manually"
+                  : `AI confidence ${Math.round((c.confidence || 0) * 100)}%`;
+                return <span key={t.id} className="pill" title={hint}>{t.name}</span>;
+              })}
+            </div>
+            <div className="meta-group meta-tags">
+              <span className="muted tag-label">Tags</span>
+              <TagEditor
+                value={(doc.tags || []).map((t: any) => t.name)}
+                onChange={saveTags}
+              />
+            </div>
           </div>
           {tagErr && <div className="muted tag-error">{tagErr}</div>}
         </div>
@@ -384,53 +453,36 @@ export function DocumentDetail() {
             )}
           </CollapsibleSection>
 
-          <CollapsibleSection title="Classifications" open={classificationsOpen} onOpenChange={setClassificationsOpen}>
-            {(doc.classifications || []).length === 0 && <div className="muted">Not classified yet.</div>}
-            {(doc.classifications || []).map((c: any, i: number) => (
-              <div key={i} className="spread" style={{ padding: "4px 0" }}>
-                <span>{c.label} {c.source === "human" && <span className="pill">manual</span>}</span>
-                <span className="muted conf">{Math.round((c.confidence || 0) * 100)}%</span>
-              </div>
-            ))}
-          </CollapsibleSection>
-
-          <CollapsibleSection
-            title="Processing Timeline"
-            open={timelineOpen}
-            onOpenChange={setTimelineOverride}
-            badge={
-              pipeline?.run?.status === "running" ? <span className="pill">running</span> : undefined
-            }
-          >
-            <div className="timeline">
-              {(pipeline?.stages || []).map((s: any) => (
-                <div className="stage" key={s.name}>
-                  <span className={`dot ${s.status}`} />
-                  <div style={{ flex: 1 }}>
-                    <div className="spread">
-                      <span>{STAGE_LABEL[s.name] || s.name}</span>
-                      <span className="muted" style={{ fontSize: 12 }}>
-                        {s.status}
-                        {s.latency_ms != null ? ` · ${s.latency_ms}ms` : ""}
-                        {s.cost_usd ? ` · $${s.cost_usd.toFixed(4)}` : ""}
-                      </span>
-                    </div>
-                    {s.error_message && <div className="err" style={{ fontSize: 12 }}>{s.error_message}</div>}
-                  </div>
-                </div>
-              ))}
-              {(!pipeline?.stages || pipeline.stages.length === 0) && (
-                <div className="muted">No pipeline run yet.</div>
-              )}
-            </div>
-            {pipeline?.run && (
-              <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-                Run cost ${pipeline.run.total_cost_usd?.toFixed(4)} · {pipeline.run.total_tokens} tokens
-              </div>
-            )}
-          </CollapsibleSection>
+          {/* Only while it matters: running, queued, or something went wrong.
+              A finished document gives this space to Summary and Extracted Data;
+              the same detail is behind "Processing details" in the header. */}
+          {timelineNeeded && (
+            <CollapsibleSection
+              title="Processing Timeline"
+              open={timelineOpen}
+              onOpenChange={setTimelineOverride}
+              badge={
+                pipeline?.run?.status === "running" ? <span className="pill">running</span> :
+                failed ? <span className="pill" style={{ color: "var(--danger)" }}>failed</span> : undefined
+              }
+            >
+              {timelineBody}
+            </CollapsibleSection>
+          )}
         </div>
       </div>
+      {/* Processing details: out of the side panel once a document is done. */}
+      {detailsOpen && (
+        <div className="modal-overlay" onClick={() => setDetailsOpen(false)}>
+          <div className="modal-card sm" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Processing details">
+            <div className="spread" style={{ marginBottom: 12 }}>
+              <h2 style={{ margin: 0 }}>Processing details</h2>
+              <button className="ghost" onClick={() => setDetailsOpen(false)}>✕ Close</button>
+            </div>
+            {timelineBody}
+          </div>
+        </div>
+      )}
 
       {/* Fullscreen summary modal */}
       {summaryOpen && (

@@ -586,6 +586,18 @@ a.ghost-link:hover { text-decoration: none; color: var(--text); background: var(
 .cal-day.in-range { background: var(--surface-2); border-radius: 0; }
 .cal-day.edge:hover { background: var(--primary-2); }
 
+/* Document header: small action buttons never wrap onto a second line. */
+.page-head .row.muted button, .page-head .row.muted .pill { white-space: nowrap; }
+.page-head .row.muted { flex-wrap: wrap; row-gap: 4px; }
+
+/* Document types + tags on one row: two groups that wrap as whole groups. */
+.meta-row { column-gap: 0; row-gap: 6px; }
+.meta-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.meta-group + .meta-group { margin-left: 16px; padding-left: 16px; border-left: 1px solid var(--border); }
+.meta-tags { flex: 1; min-width: 200px; }
+/* Wrapped onto its own line there is nothing to divide it from. */
+@media (max-width: 1100px) { .meta-group + .meta-group { border-left: none; margin-left: 0; padding-left: 0; } }
+
 /* ---- Editing an existing type in the wizard ---- */
 .stale-banner { display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap;
   margin-bottom: 12px; font-size: 13px; border-left: 4px solid var(--warn); }
