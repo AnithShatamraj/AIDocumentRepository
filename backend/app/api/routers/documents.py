@@ -36,7 +36,7 @@ from app.models.constants import (
     RV_VERIFIED,
 )
 from app.models.content import Classification, FieldValue, Summary
-from app.models.document import Document, DocumentVersion
+from app.models.document import Document, DocumentVersion, document_type_links
 from app.models.mgmt import Tenant as MgmtTenant
 from app.models.review import ReviewItem
 from app.models.tenant import User
@@ -44,6 +44,7 @@ from app.schemas import (
     BulkExtractionReview,
     BulkTagRequest,
     DocumentDetail,
+    DocumentListItem,
     DocumentOut,
     DocumentTagsSet,
     ExtractionEdit,
@@ -246,6 +247,10 @@ async def upload(
     # Only fresh content needs the (paid) pipeline; clones and links reuse results.
     if meta.get("action") == "new":
         _trigger_pipeline(doc.id, tenant.id)
+    # A document created in this request has never had its `tags` loaded, and the
+    # response schema reads them: without this the upload succeeds, then the
+    # response fails with MissingGreenlet and the client is told it failed.
+    await db.refresh(doc)
     return {"document": DocumentOut.model_validate(doc).model_dump(), **meta}
 
 
@@ -290,7 +295,7 @@ async def bulk_upload(
     return {"results": results}
 
 
-@router.get("", response_model=list[DocumentOut], summary="List documents")
+@router.get("", response_model=list[DocumentListItem], summary="List documents")
 async def list_documents(
     q: str | None = Query(default=None),
     status_filter: str | None = Query(default=None, alias="status"),
@@ -302,7 +307,8 @@ async def list_documents(
 ):
     """Only documents the caller can read (owned, individually shared, or
     shared via a group) -- optionally filtered by name substring (`q`),
-    `processing_status`, and/or `tags`. Sorted newest first, capped at 200."""
+    `processing_status`, and/or `tags`. Sorted by last modified, newest first,
+    capped at 200."""
     group_ids = await permissions.user_group_ids(db, user.id)
     cond = permissions.readable_documents_condition(user, group_ids)
     stmt = select(Document).where(cond)
@@ -325,9 +331,26 @@ async def list_documents(
             return []
         stmt = stmt.where(tag_service.documents_with_tags_condition(
             [t.id for t in found.values()], match_all=(match == "all")))
-    stmt = stmt.order_by(Document.created_at.desc()).limit(200)
-    rows = await db.execute(stmt)
-    return [DocumentOut.model_validate(d) for d in rows.scalars().all()]
+    stmt = stmt.order_by(Document.updated_at.desc()).limit(200)
+    docs = (await db.execute(stmt)).scalars().all()
+
+    # Document types for the whole page in one query (a document can carry
+    # several; the list shows all of them).
+    types_by_doc: dict[uuid.UUID, list[dict]] = {}
+    if docs:
+        links = await db.execute(
+            select(document_type_links.c.document_id, DocumentType.id, DocumentType.name)
+            .join(DocumentType, DocumentType.id == document_type_links.c.document_type_id)
+            .where(document_type_links.c.document_id.in_([d.id for d in docs]))
+            .order_by(DocumentType.name))
+        for doc_id, type_id, type_name in links.all():
+            types_by_doc.setdefault(doc_id, []).append({"id": type_id, "name": type_name})
+
+    return [
+        DocumentListItem(**DocumentOut.model_validate(d).model_dump(),
+                         document_types=types_by_doc.get(d.id, []))
+        for d in docs
+    ]
 
 
 @router.put("/{document_id}/tags", summary="Replace a document's tags")
