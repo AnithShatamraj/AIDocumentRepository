@@ -21,9 +21,9 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -271,4 +271,86 @@ async def _persist(db, user, conversation, question, answer, citations, chunk_id
     ))
     if conversation.title == "New conversation":
         conversation.title = question[:80]
+    # "Last modified" for the Research list. Adding messages doesn't change the
+    # conversation row itself, so its onupdate never fires -- touch it.
+    conversation.updated_at = dt.datetime.now(dt.timezone.utc)
     await db.commit()
+
+
+SUMMARY_CHARS = 220
+CARD_DOCS_MAX = 20
+
+
+def _summarize(text: str) -> str:
+    """Start of an answer as plain text: no [n] citation markers or markdown, trimmed."""
+    text = re.sub(r"\[\d+\]", "", text)
+    text = re.sub(r"(?m)^\s*(?:#{1,6}\s+|[-*•]\s+|\d+\.\s+)", "", text)  # headings, bullets, numbering
+    text = re.sub(r"(?m)^[\s|:\-]*\|[\s|:\-]*$", "", text)  # table divider rows (|---|---|)
+    text = re.sub(r"\s*\|\s*", " · ", text)                  # table cells -> "a · b · c"
+    text = re.sub(r"(?:\s*·\s*){2,}", " · ", text)           # row edges leave doubled separators
+    text = re.sub(r"\*\*|__|`", "", text)
+    flat = re.sub(r"\s+", " ", text).strip()
+    if len(flat) <= SUMMARY_CHARS:
+        return flat
+    return flat[:SUMMARY_CHARS].rsplit(" ", 1)[0].rstrip(",;:-") + "…"
+
+
+async def conversation_cards(db: AsyncSession, user: User, limit: int = 200,
+                             q: str | None = None) -> list[dict]:
+    """The caller's research threads, most recently modified first, each with a
+    short summary and the documents its answers cited.
+
+    Citations are stored per message, so the documents are read back from
+    there -- but re-checked against the caller's *current* permissions, as in
+    `readable_history`: a stored citation must not keep disclosing the name of a
+    document the caller can no longer open.
+    """
+    stmt = select(Conversation).where(Conversation.user_id == user.id)
+    if q:
+        stmt = stmt.where(Conversation.title.ilike(f"%{q}%"))
+    convs = (await db.execute(
+        stmt.order_by(Conversation.updated_at.desc()).limit(limit))).scalars().all()
+    if not convs:
+        return []
+    msgs = (await db.execute(
+        select(Message.conversation_id, Message.role, Message.content, Message.citations)
+        .where(Message.conversation_id.in_([c.id for c in convs]))
+        .order_by(Message.created_at))).all()
+
+    by_conv: dict[uuid.UUID, list] = {}
+    cited: set[uuid.UUID] = set()
+    for m in msgs:
+        by_conv.setdefault(m.conversation_id, []).append(m)
+        for cit in m.citations or []:
+            try:
+                cited.add(uuid.UUID(str(cit.get("document_id"))))
+            except (ValueError, TypeError):
+                continue
+
+    readable: set[str] = set()
+    if cited:
+        group_ids = await permissions.user_group_ids(db, user.id)
+        cond = permissions.readable_documents_condition(user, group_ids)
+        rows = await db.execute(select(Document.id).where(Document.id.in_(cited), cond))
+        readable = {str(r[0]) for r in rows.all()}
+
+    cards = []
+    for c in convs:
+        ms = by_conv.get(c.id, [])
+        docs: dict[str, str] = {}
+        summary = ""
+        for m in ms:
+            if m.role != "assistant" or m.content == REFUSAL:
+                continue
+            summary = m.content  # ends as the latest real answer
+            for cit in m.citations or []:
+                if str(cit.get("document_id")) in readable:
+                    docs.setdefault(str(cit["document_id"]), cit["document_name"])
+        cards.append({
+            "id": str(c.id), "title": c.title, "updated_at": c.updated_at.isoformat(),
+            "summary": _summarize(summary),
+            "message_count": len(ms),
+            "documents": [{"id": i, "name": n} for i, n in list(docs.items())[:CARD_DOCS_MAX]],
+            "document_count": len(docs),
+        })
+    return cards
