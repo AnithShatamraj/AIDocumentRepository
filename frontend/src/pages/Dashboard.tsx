@@ -3,13 +3,14 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
 
-function Tile({ label, value }: { label: string; value: any }) {
-  return (
+function Tile({ label, value, to }: { label: string; value: any; to?: string }) {
+  const body = (
     <div className="card tile">
       <div className="label">{label}</div>
       <div className="value">{value}</div>
     </div>
   );
+  return to ? <Link to={to} className="tile-link">{body}</Link> : body;
 }
 
 export function Dashboard() {
@@ -24,10 +25,59 @@ export function Dashboard() {
         <div className="muted">Operational insight across your authorized documents.</div>
       </div>
 
-      <div className="grid cols-4">
+      <div className="grid cols-2">
+        <div className="card">
+          <h2>Recent Uploads</h2>
+          <table>
+            <thead>
+              <tr><th>Name</th><th>Status</th><th>Uploaded</th></tr>
+            </thead>
+            <tbody>
+              {(data.recent_uploads || []).map((d: any) => (
+                <tr key={d.id}>
+                  <td><Link to={`/documents/${d.id}`}>{d.name}</Link></td>
+                  <td><StatusBadge status={d.status} /></td>
+                  <td className="muted">{new Date(d.created_at).toLocaleString()}</td>
+                </tr>
+              ))}
+              {(data.recent_uploads || []).length === 0 && (
+                <tr><td className="muted">Upload a document to get started.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="card">
+          <div className="spread">
+            <h2>Recent Research</h2>
+            <Link to="/research">View all</Link>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Research</th><th>Summary</th><th>Last modified</th></tr>
+            </thead>
+            <tbody>
+              {(data.recent_researches || []).map((r: any) => (
+                <tr key={r.id}>
+                  <td className="clip-cell"><Link to={`/research/${r.id}`}>{r.title}</Link></td>
+                  <td className="muted clip-cell">{r.summary || "—"}</td>
+                  <td className="muted nowrap">{new Date(r.updated_at).toLocaleString()}</td>
+                </tr>
+              ))}
+              {(data.recent_researches || []).length === 0 && (
+                <tr><td colSpan={3} className="muted">
+                  No research yet. <Link to="/research/new">Start one</Link>.
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="grid cols-4" style={{ marginTop: 16 }}>
         <Tile label="Total Documents" value={data.total_documents} />
         <Tile
           label="Pending Reviews"
+          to="/review"
           value={
             <span>
               {data.pending_reviews.count}
@@ -79,27 +129,6 @@ export function Dashboard() {
             </tbody>
           </table>
         </div>
-      </div>
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <h2>Recent Uploads</h2>
-        <table>
-          <thead>
-            <tr><th>Name</th><th>Status</th><th>Uploaded</th></tr>
-          </thead>
-          <tbody>
-            {(data.recent_uploads || []).map((d: any) => (
-              <tr key={d.id}>
-                <td><Link to={`/documents/${d.id}`}>{d.name}</Link></td>
-                <td><StatusBadge status={d.status} /></td>
-                <td className="muted">{new Date(d.created_at).toLocaleString()}</td>
-              </tr>
-            ))}
-            {(data.recent_uploads || []).length === 0 && (
-              <tr><td className="muted">Upload a document to get started.</td></tr>
-            )}
-          </tbody>
-        </table>
       </div>
     </div>
   );

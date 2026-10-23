@@ -15,7 +15,7 @@ from app.models.document import Document, document_type_links
 from app.models.ops import CostRecord
 from app.models.review import ReviewItem
 from app.models.tenant import User
-from app.services import permissions
+from app.services import chat, permissions
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -91,6 +91,7 @@ async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = D
         "processing_status": by_status,
         "pending_reviews": {"count": pending, "oldest_age_hours": oldest_age_hours},
         "recent_uploads": recent,
+        "recent_researches": (await chat.conversation_cards(db, user, limit=5)),
         "extraction_auto_accept_rate": autoaccept,
         "ai_cost_period_to_date_usd": round(float(cost_ptd or 0.0), 4),
     }
