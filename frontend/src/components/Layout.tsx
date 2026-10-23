@@ -1,16 +1,17 @@
-import { createContext, ReactNode, useContext, useState } from "react";
-import { NavLink } from "react-router-dom";
+import { createContext, ReactNode, useContext, useEffect, useState } from "react";
+import { NavLink, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { NotificationBell } from "./NotificationBell";
 
 const links = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/documents", label: "Documents" },
-  { to: "/search", label: "Search" },
-  { to: "/research", label: "Research Assistant" },
-  { to: "/review", label: "Review Queue" },
+  { to: "/research", label: "Research" },
+];
+
+const adminLinks = [
+  { to: "/admin", label: "Settings" },
   { to: "/document-types", label: "Document Types" },
-  { to: "/admin", label: "Administration" },
 ];
 
 interface LayoutNavCtx {
@@ -38,6 +39,14 @@ export function Layout({ children }: { children: ReactNode }) {
     () => localStorage.getItem("aidocs_nav_collapsed") === "1"
   );
   const [chromeHidden, setChromeHidden] = useState(false);
+  // The Administration group opens by default when you're on one of its pages,
+  // so the active item is never hidden; otherwise it stays as the user left it.
+  const { pathname } = useLocation();
+  const inAdmin = adminLinks.some((l) => pathname === l.to || pathname.startsWith(`${l.to}/`));
+  const [adminOpen, setAdminOpen] = useState(inAdmin);
+  useEffect(() => {
+    if (inAdmin) setAdminOpen(true);
+  }, [inAdmin]);
   const [theme, setTheme] = useState(
     () => localStorage.getItem("aidocs_theme") || "dark"
   );
@@ -71,6 +80,24 @@ export function Layout({ children }: { children: ReactNode }) {
                 {l.label}
               </NavLink>
             ))}
+            <button
+              type="button"
+              className={`nav-group${inAdmin ? " current" : ""}`}
+              aria-expanded={adminOpen}
+              onClick={() => setAdminOpen((o) => !o)}
+            >
+              <span>Administration</span>
+              <span className="chev">{adminOpen ? "▾" : "▸"}</span>
+            </button>
+            {adminOpen && (
+              <div className="nav-sub">
+                {adminLinks.map((l) => (
+                  <NavLink key={l.to} to={l.to}>
+                    {l.label}
+                  </NavLink>
+                ))}
+              </div>
+            )}
           </nav>
           <div className="side-foot muted" style={{ marginTop: "auto", fontSize: 12 }}>
             Permission-aware · multi-tenant
