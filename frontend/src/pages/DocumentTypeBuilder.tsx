@@ -27,7 +27,7 @@ const ACTION_TEXT: Record<string, string> = {
   skip_samples: "No samples — skip",
   derive_fields: "Derive fields from my samples",
 };
-const ACCEPT = ".pdf,.docx,.pptx,.xlsx,.csv,.txt,.png,.jpg,.jpeg,.tif,.tiff";
+const ACCEPT = ".pdf,.docx,.doc,.pptx,.ppt,.odt,.odp,.rtf,.xlsx,.csv,.txt,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.webp";
 
 /** Sorted-key JSON, so two structurally equal trees compare equal regardless
  * of the key order Postgres' JSONB hands back. */

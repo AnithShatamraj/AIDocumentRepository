@@ -17,7 +17,7 @@ interface FileOutcome {
   text: string;
 }
 
-const ACCEPT = ".pdf,.docx,.pptx,.xlsx,.csv,.txt,.png,.jpg,.jpeg,.tiff";
+const ACCEPT = ".pdf,.docx,.doc,.pptx,.ppt,.odt,.odp,.rtf,.xlsx,.csv,.txt,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif,.webp";
 
 function actionText(r: any): string {
   if (r.action === "cloned") return "Identical content already existed — results reused.";

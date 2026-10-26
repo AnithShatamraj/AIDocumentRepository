@@ -149,12 +149,45 @@ def _label_similarity(a: str, b: str) -> float:
     return max(overlap, ratio)
 
 
+_MIN_VALUE_CHARS = 5       # shorter than this ("3", "Pune", "Yes") says nothing about identity
+_MIN_DIGITS = 3            # a number this long is distinctive wherever it appears
+_MIN_COVERAGE = 0.6        # otherwise the shorter value must be most of the longer one
+
+
 def _values_match(a: str | None, b: str | None) -> bool:
+    """Do two extracted values state the same thing? Tolerant of formatting
+    ("₹50,000" = "Rs. 50000") and of extra words around a figure ("Rs. 60,000/-"
+    inside "Rs. 60,000/- (Rupees Sixty Thousand Only)").
+
+    Deliberately NOT a plain substring test: "3" is inside "Rs. 390/-" and
+    "licensee" is inside "Licensees cannot make alterations", but neither pair is a
+    restatement. A value must be distinctive (long enough) and, if it is only part of
+    the other, either carry a real number or be most of it."""
     if not a or not b:
         return False
     na = re.sub(r"[^a-z0-9]", "", a.lower())
     nb = re.sub(r"[^a-z0-9]", "", b.lower())
-    return bool(na) and bool(nb) and (na == nb or na in nb or nb in na)
+    if len(na) < _MIN_VALUE_CHARS or len(nb) < _MIN_VALUE_CHARS:
+        return False
+    if na == nb:
+        return True
+    short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if short not in long:
+        return False
+    return sum(ch.isdigit() for ch in short) >= _MIN_DIGITS or len(short) / len(long) >= _MIN_COVERAGE
+
+
+def matching_known(name: str, value: str, known: list[tuple[str, str]],
+                   label_threshold: float = 0.5) -> tuple[str, str] | None:
+    """The already-extracted (label, value) that `name`/`value` restates, if any.
+
+    A match is a similar label (sharing a meaningful word, e.g. "Security Deposit
+    Amount" ~ "Deposit Amount") or the same value (one contains the other, so
+    "Rs. 60,000/-" ~ "Rs. 60,000/- (Rupees Sixty Thousand Only)")."""
+    for kname, kvalue in known:
+        if _label_similarity(name, kname) >= label_threshold or _values_match(value, kvalue):
+            return kname, kvalue
+    return None
 
 
 def _is_duplicate_of_known(name: str, value: str, known: list[tuple[str, str]],
@@ -168,10 +201,7 @@ def _is_duplicate_of_known(name: str, value: str, known: list[tuple[str, str]],
     itself, which is why the prompt above is grounded with the real extracted
     values rather than bare field names.
     """
-    for kname, kvalue in known:
-        if _label_similarity(name, kname) >= label_threshold or _values_match(value, kvalue):
-            return True
-    return False
+    return matching_known(name, value, known, label_threshold) is not None
 
 
 def discover_entities(text: str, known: list[tuple[str, str]], type_name: str, limit: int = 8):

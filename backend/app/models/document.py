@@ -70,6 +70,10 @@ class Document(Base, TimestampMixin):
         PGUUID(as_uuid=True), ForeignKey("document_types.id", ondelete="SET NULL"), nullable=True
     )
 
+    # A person added or removed one of this document's types. Reprocessing then keeps
+    # the types as they are instead of classifying again.
+    types_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     deleted_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -109,6 +113,9 @@ class DocumentVersion(Base, TimestampMixin):
     file_size: Mapped[int] = mapped_column(BigInteger, default=0)
     content_hash: Mapped[str] = mapped_column(String(64), default="")
     mime_type: Mapped[str] = mapped_column(String(128), default="")
+    # PDF rendition of a Word/PowerPoint/image original (NULL for PDFs and anything
+    # not converted). It is what the pipeline parses and the viewer shows.
+    rendition_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     uploaded_by: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True

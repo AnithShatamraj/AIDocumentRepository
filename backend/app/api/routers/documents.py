@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.models.catalog import DocumentType, TypeSchema
 from app.models.constants import (
     AUDIT_CONFIG_CHANGE,
+    AUDIT_METADATA_CHANGE,
     AUDIT_DELETE,
     AUDIT_DOWNLOAD,
     AUDIT_RESTORE,
@@ -46,6 +47,9 @@ from app.models.tenant import User
 from app.schemas import (
     BulkExtractionReview,
     BulkTagRequest,
+    AddDocumentTypeRequest,
+    BulkDeleteRequest,
+    ExtractNewFieldsRequest,
     FieldSuggestRequest,
     PromoteFieldsRequest,
     DocumentDetail,
@@ -57,7 +61,10 @@ from app.schemas import (
     PresignedUrl,
 )
 from app.ai import field_suggest
-from app.services import audit, field_promotion, ingest_policy, mime, normalize, permissions
+from app.services import (
+    audit, extraction_rows, field_extraction, field_promotion, ingest_policy, mime, normalize, permissions,
+)
+from app.services.fields import ensure_keys, validate_schema
 from app.services import tags as tag_service
 from app.services.hashing import sha256_hex
 from app.storage import get_storage
@@ -156,6 +163,7 @@ async def _create_document(db, user, tenant, filename, data, description, *, nam
     # the other document exists, they simply get their own fully-processed copy.
     if dup is not None and dup.processing_status in (DOC_PROCESSED, DOC_NEEDS_REVIEW):
         counts = await ingest_policy.clone_derived_artifacts(db, dup, doc)
+        await _clone_rendition(db, tenant, dup, doc)
         meta = {"action": "cloned", "reused": counts}
         if readable:
             meta["duplicate_of"] = str(dup.id)
@@ -163,6 +171,21 @@ async def _create_document(db, user, tenant, filename, data, description, *, nam
         return doc, meta
 
     return doc, {"action": "new", "duplicate_of": str(dup.id) if (dup and readable) else None}
+
+
+async def _clone_rendition(db, tenant, source: Document, target: Document) -> None:
+    """A clone owns its own copy of the PDF rendition, like it owns its chunks."""
+    src, tgt = [(await db.execute(
+        select(DocumentVersion).where(DocumentVersion.document_id == d.id,
+                                      DocumentVersion.version == d.current_version)
+    )).scalars().first() for d in (source, target)]
+    if not (src and tgt and src.rendition_key):
+        return
+    storage = get_storage(tenant)
+    key = f"{tgt.storage_key}.rendition.pdf"
+    data = await asyncio.to_thread(storage.get_bytes, src.rendition_key)
+    await asyncio.to_thread(storage.put_object, key, data, "application/pdf")
+    tgt.rendition_key = key
 
 
 async def _grant_read(db, user, doc: Document) -> None:
@@ -386,6 +409,30 @@ async def set_document_tags(
     return {"tags": [{"id": str(t.id), "name": t.name} for t in applied]}
 
 
+@router.post("/bulk-delete", summary="Soft-delete many documents")
+async def bulk_delete(
+    body: BulkDeleteRequest, request: Request,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_tenant_db),
+):
+    """Same rule as the single delete (recoverable for the retention window),
+    applied to each listed document the caller may delete. Others are skipped
+    rather than failing the call, since a selection can span a permission
+    boundary. Returns `{deleted, skipped}`."""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = 0
+    for doc_id in dict.fromkeys(body.document_ids):  # de-duplicated, order kept
+        doc = await db.get(Document, doc_id)
+        if not doc or doc.is_deleted or not await permissions.has_permission(db, user, doc.id, PERM_DELETE):
+            continue
+        doc.is_deleted, doc.deleted_at = True, now
+        await audit.log_event(db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_DELETE,
+                              object_type="document", object_id=doc.id, detail={"bulk": True},
+                              ip_address=client_ip(request), commit=False)
+        deleted += 1
+    await db.commit()
+    return {"deleted": deleted, "skipped": len(set(body.document_ids)) - deleted}
+
+
 @router.post("/bulk-tag", summary="Add or remove tags across many documents")
 async def bulk_tag(
     body: BulkTagRequest, request: Request,
@@ -456,9 +503,24 @@ async def get_document(document_id: str, request: Request, user: User = Depends(
                           object_type="document", object_id=doc.id, ip_address=client_ip(request))
 
     detail = DocumentDetail.model_validate(doc).model_dump()
-    detail["document_types"] = [{"id": str(c.id), "name": c.name, "description": c.description,
-                             "is_enabled": c.is_enabled, "active_schema_id": str(c.active_schema_id) if c.active_schema_id else None}
-                            for c in doc.document_types]
+    current = (await db.execute(
+        select(DocumentVersion.rendition_key).where(DocumentVersion.document_id == doc.id,
+                                                    DocumentVersion.version == doc.current_version)
+    )).scalar()
+    detail["has_pdf"] = doc.file_type == "pdf" or bool(current)  # something the PDF viewer can show
+    detail["document_types"] = []
+    value_counts = dict((await db.execute(
+        select(FieldValue.document_type_id, func.count()).where(
+            FieldValue.document_id == doc.id, FieldValue.document_version == doc.current_version,
+            FieldValue.node_kind == "scalar").group_by(FieldValue.document_type_id))).all())
+    for c in doc.document_types:
+        # Fields the type gained after this document was read; the page offers to read just those.
+        new_fields, _ = await field_extraction.new_fields_for_document(db, doc, c)
+        detail["document_types"].append({
+            "id": str(c.id), "name": c.name, "description": c.description, "is_enabled": c.is_enabled,
+            "active_schema_id": str(c.active_schema_id) if c.active_schema_id else None,
+            "value_count": value_counts.get(c.id, 0),  # what removing this type would delete
+            "new_fields": [{"key": f["key"], "name": f["name"], "data_type": f["data_type"]} for f in new_fields]})
     detail["summary"] = ({"executive_summary": summary.executive_summary, "highlights": summary.highlights,
                           "model_version": summary.model_version} if summary else None)
     detail["fields"] = _build_field_tree(extractions)
@@ -488,8 +550,10 @@ async def download(document_id: str, request: Request, version: int | None = Que
     if not dv:
         raise HTTPException(404, "Version not found")
     # inline => no Content-Disposition header, so the viewer can render it in-browser.
+    # The viewer shows the PDF rendition of a converted file; a download is the original.
     filename = None if disposition == "inline" else doc.name
-    url = await asyncio.to_thread(get_storage(tenant).presigned_get_url, dv.storage_key, 900, filename)
+    key = dv.rendition_key if (disposition == "inline" and dv.rendition_key) else dv.storage_key
+    url = await asyncio.to_thread(get_storage(tenant).presigned_get_url, key, 900, filename)
     await audit.log_event(db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_DOWNLOAD,
                           object_type="document", object_id=doc.id,
                           detail={"version": v, "disposition": disposition}, ip_address=client_ip(request))
@@ -539,12 +603,13 @@ async def page_image(document_id: str, page_no: int, version: int | None = Query
     if not dv:
         raise HTTPException(404, "Version not found")
 
-    data = _PDF_CACHE.get(dv.storage_key)
+    pdf_key = dv.rendition_key or dv.storage_key
+    data = _PDF_CACHE.get(pdf_key)
     if data is None:
-        data = await asyncio.to_thread(get_storage(tenant).get_bytes, dv.storage_key)
+        data = await asyncio.to_thread(get_storage(tenant).get_bytes, pdf_key)
         if len(_PDF_CACHE) >= _PDF_CACHE_MAX:
             _PDF_CACHE.pop(next(iter(_PDF_CACHE)))
-        _PDF_CACHE[dv.storage_key] = data
+        _PDF_CACHE[pdf_key] = data
     try:
         png = await asyncio.to_thread(_render_page_png, data, page_no, scale)
     except IndexError as e:
@@ -722,6 +787,182 @@ async def suggest_new_field_details(
     }
 
 
+@router.post("/{document_id}/fields/extract-new", summary="Read the fields a type gained since this document was extracted")
+async def extract_new_fields(
+    document_id: str,
+    body: ExtractNewFieldsRequest,
+    request: Request,
+    user: User = Depends(require_reviewer),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """When a field is added to a document type, documents already read under it
+    don't have that field. Reprocessing fixes that but redoes everything and
+    deletes the document's reviewed and edited values. This reads only the
+    missing fields from the document's stored text and adds them, leaving every
+    other value alone. The new values go through the normal auto-accept rule, so
+    uncertain ones appear for review. All or nothing."""
+    doc = await db.get(Document, document_id)
+    if not doc or not await permissions.can_read(db, user, doc.id):
+        raise HTTPException(404, "Document not found")
+    dt = await db.get(DocumentType, body.document_type_id)
+    linked = dt is not None and (await db.execute(
+        select(document_type_links.c.document_id).where(
+            document_type_links.c.document_id == doc.id,
+            document_type_links.c.document_type_id == dt.id))).first() is not None
+    if not linked or dt.tenant_id != user.tenant_id:
+        raise HTTPException(404, "That document type isn't one of this document's types")
+
+    new_fields, schema = await field_extraction.new_fields_for_document(db, doc, dt)
+    wanted = [f for f in new_fields if not body.keys or f["key"] in body.keys]
+    if not wanted:
+        raise HTTPException(409, "Nothing new to extract: this document already has every field of this type.")
+
+    defs = validate_schema(ensure_keys(wanted))
+    order = {f["key"]: i for i, f in enumerate(schema.fields)}
+    try:
+        built = await field_extraction.extract_fields(db, doc, dt, defs, schema.version)
+    except field_extraction.FieldExtractionError as e:
+        await db.rollback()
+        raise HTTPException(e.status, e.message)
+
+    # A list the model found nothing for still gets an (empty) row, so it isn't offered again.
+    filler = extraction_rows.build_rows(
+        field_extraction.empty_containers(defs, built), tenant_id=doc.tenant_id, document_id=doc.id,
+        document_version=doc.current_version, doc_type_id=dt.id, doc_type_name=dt.name,
+        schema_version=schema.version, model="", prompt_version="", layout_units=[], autoaccept=1.0)
+    for row in [*built.fields, *filler.fields]:
+        if row.parent_id is None:
+            row.ordinal = order.get(row.field_key)
+    db.add_all([*built.fields, *filler.fields])
+    await db.flush()  # review items point at these rows
+    db.add_all(built.reviews)
+
+    remaining = await _flip_doc_status_on_pending_change(db, doc)
+    extracted = []
+    for d in defs:
+        mine = [f for f in built.fields if f.field_path == d.key or f.field_path.startswith((f"{d.key}[", f"{d.key}."))]
+        top = next((f for f in mine if f.field_path == d.key), None)
+        extracted.append({
+            "key": d.key, "name": d.name, "data_type": d.data_type,
+            # "Found" means a value was actually read, not just that a row exists for the question.
+            "found": any(f.raw_value for f in mine if f.node_kind == "scalar"),
+            "entries": sum(1 for f in mine if top and f.parent_id == top.id) if d.data_type in ("list", "object") else None,
+        })
+    await audit.log_event(
+        db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_METADATA_CHANGE,
+        object_type="document", object_id=doc.id,
+        detail={"action": "extract_new_fields", "document_type": dt.name, "schema_version": schema.version,
+                "fields": [e["name"] for e in extracted]},
+        ip_address=client_ip(request), commit=False)
+    await db.commit()
+    return {"extracted": extracted, "document_status": doc.processing_status, "pending_remaining": remaining}
+
+
+async def _linked(db: AsyncSession, doc: Document, type_id) -> bool:
+    return (await db.execute(select(document_type_links.c.document_id).where(
+        document_type_links.c.document_id == doc.id,
+        document_type_links.c.document_type_id == type_id))).first() is not None
+
+
+@router.post("/{document_id}/types", summary="Add a document type to this document and read its fields")
+async def add_document_type(
+    document_id: str,
+    body: AddDocumentTypeRequest,
+    request: Request,
+    user: User = Depends(require_reviewer),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """For a document the AI missed a type on. Links the type, then reads every
+    field of its current schema from the document's stored text. Other types'
+    values are untouched. The new values follow the normal auto-accept rule.
+    All or nothing: if the read fails nothing is added."""
+    doc = await db.get(Document, document_id)
+    if not doc or not await permissions.can_read(db, user, doc.id):
+        raise HTTPException(404, "Document not found")
+    dt = await db.get(DocumentType, body.document_type_id)
+    if dt is None or dt.tenant_id != user.tenant_id or not dt.is_enabled:
+        raise HTTPException(404, "Document type not found")
+    if await _linked(db, doc, dt.id):
+        raise HTTPException(409, f"This document is already a {dt.name}.")
+
+    schema = await db.get(TypeSchema, dt.active_schema_id) if dt.active_schema_id else None
+    built = filler = None
+    if schema is not None and schema.fields:
+        defs = validate_schema(ensure_keys(schema.fields))
+        try:
+            built = await field_extraction.extract_fields(db, doc, dt, defs, schema.version)
+        except field_extraction.FieldExtractionError as e:
+            await db.rollback()
+            raise HTTPException(e.status, e.message)
+        filler = extraction_rows.build_rows(
+            field_extraction.empty_containers(defs, built), tenant_id=doc.tenant_id, document_id=doc.id,
+            document_version=doc.current_version, doc_type_id=dt.id, doc_type_name=dt.name,
+            schema_version=schema.version, model="", prompt_version="", layout_units=[], autoaccept=1.0)
+        order = {f["key"]: i for i, f in enumerate(schema.fields)}
+        for row in [*built.fields, *filler.fields]:
+            if row.parent_id is None:
+                row.ordinal = order.get(row.field_key)
+        db.add_all([*built.fields, *filler.fields])
+        await db.flush()  # review items point at these rows
+        db.add_all(built.reviews)
+
+    await db.execute(document_type_links.insert().values(document_id=doc.id, document_type_id=dt.id))
+    db.add(Classification(tenant_id=user.tenant_id, document_id=doc.id, document_type_id=dt.id,
+                          label=dt.name, confidence=1.0, source="human", is_override=True))
+    doc.types_locked = True
+    remaining = await _flip_doc_status_on_pending_change(db, doc)
+    count = len(built.fields) if built else 0
+    await audit.log_event(
+        db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_METADATA_CHANGE,
+        object_type="document", object_id=doc.id,
+        detail={"action": "add_document_type", "document_type": dt.name, "values": count},
+        ip_address=client_ip(request), commit=False)
+    await db.commit()
+    return {"document_type": dt.name, "values": count, "pending_remaining": remaining,
+            "document_status": doc.processing_status}
+
+
+@router.delete("/{document_id}/types/{type_id}", summary="Remove a document type and its extracted data")
+async def remove_document_type(
+    document_id: str,
+    type_id: str,
+    request: Request,
+    user: User = Depends(require_reviewer),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """For a document the AI gave the wrong type. Unlinks the type and deletes the
+    values extracted under it -- including its suggested ("new") fields and any
+    review items on them. Other types' values are untouched. Reprocessing keeps
+    the result, because a person has now chosen this document's types."""
+    doc = await db.get(Document, document_id)
+    if not doc or not await permissions.can_read(db, user, doc.id):
+        raise HTTPException(404, "Document not found")
+    dt = await db.get(DocumentType, type_id)
+    if dt is None or dt.tenant_id != user.tenant_id or not await _linked(db, doc, dt.id):
+        raise HTTPException(404, "That document type isn't one of this document's types")
+
+    scope = (FieldValue.document_id == doc.id, FieldValue.document_type_id == dt.id)
+    removed = (await db.execute(select(func.count()).select_from(FieldValue).where(*scope))).scalar() or 0
+    # Review items go with their values (the FK cascades); say so explicitly so the
+    # queue is right even if a database was built without the cascade.
+    await db.execute(delete(ReviewItem).where(ReviewItem.field_value_id.in_(select(FieldValue.id).where(*scope))))
+    await db.execute(delete(FieldValue).where(*scope))
+    await db.execute(document_type_links.delete().where(
+        document_type_links.c.document_id == doc.id, document_type_links.c.document_type_id == dt.id))
+    await db.execute(delete(Classification).where(
+        Classification.document_id == doc.id, Classification.document_type_id == dt.id))
+    doc.types_locked = True
+    remaining = await _flip_doc_status_on_pending_change(db, doc)
+    await audit.log_event(
+        db, tenant_id=user.tenant_id, actor_id=user.id, event_type=AUDIT_METADATA_CHANGE,
+        object_type="document", object_id=doc.id,
+        detail={"action": "remove_document_type", "document_type": dt.name, "values_deleted": removed},
+        ip_address=client_ip(request), commit=False)
+    await db.commit()
+    return {"document_type": dt.name, "values_deleted": removed, "pending_remaining": remaining,
+            "document_status": doc.processing_status}
+
+
 @router.post("/{document_id}/fields/promote", summary="Add new fields to a document type")
 async def promote_new_fields(
     document_id: str,
@@ -741,7 +982,8 @@ async def promote_new_fields(
 
     items = [field_promotion.PromoteItem(
         field_value_id=str(i.field_value_id), name=i.name, description=i.description,
-        data_type=i.data_type, document_type_id=str(i.document_type_id), existing_key=i.existing_key)
+        data_type=i.data_type, document_type_id=str(i.document_type_id), existing_key=i.existing_key,
+        shape=i.shape, columns=[c.model_dump() for c in i.columns] if i.columns else None)
         for i in body.items]
     try:
         results = await field_promotion.promote_fields(db, admin, doc, items)
@@ -911,6 +1153,7 @@ async def upload_new_version(document_id: str, file: UploadFile = File(...),
     db.add(DocumentVersion(tenant_id=user.tenant_id, document_id=doc.id, version=new_v, storage_key=key,
                            file_size=len(data), content_hash=sha256_hex(data), mime_type=mime_type, uploaded_by=user.id))
     doc.current_version = new_v
+    doc.file_type, doc.mime_type = ext, mime_type  # a new version may be a different format
     doc.file_size = len(data)
     doc.processing_status = DOC_PENDING
     await db.commit()

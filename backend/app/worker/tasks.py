@@ -64,7 +64,7 @@ from app.models.mgmt import Tenant as MgmtTenant
 from app.models.ops import CostRecord, Notification
 from app.models.pipeline import PipelineRun, PipelineStage
 from app.models.review import ReviewItem
-from app.services import bbox_locator, chunking, normalize, parsing
+from app.services import bbox_locator, chunking, conversion, extraction_rows, normalize, parsing
 from app.storage import get_storage
 from app.worker.celery_app import celery_app
 
@@ -253,11 +253,34 @@ def start_processing(document_id: str, tenant_id: str, from_stage: str | None = 
 def stage_text_extraction(self, run_id: str, tenant_id: str) -> str:
     def work(db, run, stage, tenant):
         version = _latest_version(db, run.document_id, run.document_version)
-        data = get_storage(tenant).get_bytes(version.storage_key)
+        storage = get_storage(tenant)
+        data = storage.get_bytes(version.storage_key)
         doc = db.get(Document, run.document_id)
-        parsed = parsing.parse(data, doc.file_type)
+        parse_type, conversion_note = doc.file_type, None
+        if conversion.needs_conversion(doc.file_type):
+            # Everything else is read as a PDF: convert once, keep the PDF beside the
+            # original, and let the existing layout/OCR path (and the viewer) use it.
+            try:
+                if version.rendition_key:  # a retry: reuse the PDF already made
+                    data = storage.get_bytes(version.rendition_key)
+                else:
+                    data = conversion.to_pdf(data, doc.file_type, doc.name)
+                    key = f"{version.storage_key}.rendition.pdf"
+                    storage.put_object(key, data, "application/pdf")
+                    version.rendition_key = key
+                parse_type = "pdf"
+            except conversion.ConversionError as e:
+                if doc.file_type not in ("docx", "pptx"):
+                    raise  # nothing to read the file with: fail visibly
+                # Word/PowerPoint can still be read natively (text only, no preview).
+                conversion_note = f"PDF conversion failed, read natively: {e}"
+                log.warning("conversion_fallback_native", document_id=str(doc.id), error=str(e)[:300])
+                data = storage.get_bytes(version.storage_key)
+        parsed = parsing.parse(data, parse_type)
+        if conversion_note:
+            parsed["warning"] = conversion_note
         text = parsed.get("text", "")
-        if doc.file_type == "pdf" and not text.strip():
+        if parse_type == "pdf" and not text.strip():
             # A PDF that yields no text after docling(+OCR)+fallback is a real
             # failure — fail loudly (dead-letter) instead of running the AI
             # stages on empty input. (Images legitimately yield no text until
@@ -268,6 +291,7 @@ def stage_text_extraction(self, run_id: str, tenant_id: str) -> str:
         version.understanding = parsed
         db.add(version)
         return {"chars": len(text), "units": len(parsed.get("units", [])),
+                "converted_from": doc.file_type if version.rendition_key else None,
                 "anchor_type": parsed.get("anchor_type"), "warning": parsed.get("warning"),
                 "parser": parsed.get("parser"), "ocr_used": parsed.get("ocr_used")}
     return _run_stage(self, run_id, tenant_id, STAGE_EXTRACT, work)
@@ -290,6 +314,13 @@ def stage_classification(self, run_id: str, tenant_id: str) -> str:
         version = _latest_version(db, run.document_id, run.document_version)
         text = version.extracted_text or ""
         doc = db.get(Document, run.document_id)
+
+        if doc.types_locked:  # a person chose this document's types: don't second-guess them
+            names = db.execute(
+                select(DocumentType.name).join(document_type_links,
+                                               document_type_links.c.document_type_id == DocumentType.id)
+                .where(document_type_links.c.document_id == run.document_id)).scalars().all()
+            return {"labels": [], "assigned": list(names), "skip_extraction": not names, "strategy": "manual"}
 
         # Idempotent: clear prior AI classifications + type links for this doc.
         db.execute(delete(Classification).where(
@@ -388,13 +419,24 @@ def stage_metadata(self, run_id: str, tenant_id: str) -> str:
             FieldValue.document_id == run.document_id, FieldValue.document_version == run.document_version))
 
         total_fields, review_items = 0, 0
+        # Phase 1: read every type's schema fields. Phase 2: discovery, only after all
+        # of that, so each type's pass knows what *every* type found. Running it per
+        # type, straight after that type's own extraction, let one type propose as
+        # "new" a fact another type had already read.
+        extracted: list[tuple] = []
+        known: list[tuple[str, str]] = []
         for cat in assigned_cats:
             schema = db.get(TypeSchema, cat.active_schema_id) if cat.active_schema_id else None
             if not schema or not schema.fields:
                 continue
-            counts = _extract_for_type(db, run, stage, cat, schema, text, layout_units)
-            total_fields += counts[0]
-            review_items += counts[1]
+            written, pending, facts = _extract_for_type(db, run, stage, cat, schema, text, layout_units)
+            total_fields += written
+            review_items += pending
+            known.extend(facts)
+            extracted.append((cat, schema))
+        for cat, schema in extracted:
+            # Grows as types are processed, so two types don't both propose the same fact.
+            known.extend(_discover_for_type(db, run, cat, schema, text, layout_units, known))
 
         if review_items:
             doc = db.get(Document, run.document_id)
@@ -485,9 +527,20 @@ def _threshold_for(field_key: str, default: float, overrides: dict) -> float:
     return float(overrides.get(field_key, default))
 
 
-def _extract_for_type(db, run, stage, doc_type, schema, text, layout_units) -> tuple[int, int]:
-    """Extract one document type's field tree into `field_values` rows."""
-    from app.ai.agents.structured import discover_entities, extract_structured
+# Facts read for the whole document, across every type, are what discovery is
+# checked against. Cap what we carry so a document with many types can't grow the
+# prompt without bound (the prompt itself only previews each value).
+_MAX_KNOWN_FACTS = 150
+
+
+def _extract_for_type(db, run, stage, doc_type, schema, text, layout_units) -> tuple[int, int, list[tuple[str, str]]]:
+    """Extract one document type's schema fields into `field_values` rows.
+
+    Returns (values written, values needing review, facts read) -- the facts are
+    (label, value) pairs for discovery to compare against. Discovery is a separate
+    step (`_discover_for_type`) because it must see what *every* type found.
+    """
+    from app.ai.agents.structured import extract_structured
     from app.services import fields as fieldsvc
 
     defs = fieldsvc.validate_schema(schema.fields)
@@ -497,79 +550,42 @@ def _extract_for_type(db, run, stage, doc_type, schema, text, layout_units) -> t
     _record_cost(db, run, STAGE_METADATA, usage)
 
     tree = fieldsvc.flatten_response(defs, payload)
-    autoaccept = settings.extract_autoaccept_threshold
-    written = review_items = 0
+    built = extraction_rows.build_rows(
+        tree, tenant_id=run.tenant_id, document_id=run.document_id, document_version=run.document_version,
+        doc_type_id=doc_type.id, doc_type_name=doc_type.name, schema_version=schema.version,
+        model=usage.model, prompt_version=prompts.PROMPT_VERSIONS["extract"], layout_units=layout_units,
+        autoaccept=settings.extract_autoaccept_threshold)
+    db.add_all(built.fields)
+    db.flush()  # review items reference these rows
+    db.add_all(built.reviews)
 
-    def persist(node: fieldsvc.FlatValue, parent_id) -> None:
-        nonlocal written, review_items
-        is_leaf = node.node_kind == "scalar"
-        norm = None
-        conf = node.confidence
-        status = RV_AUTO_ACCEPTED
-        loc = None
+    # Every fact read, label and real value, including nested/list ones (e.g.
+    # "Tenants #2 PAN: ..."). Without the actual values the model has no way to
+    # recognise a differently-worded restatement of a fact it already found (e.g.
+    # "Refundable Deposit Amount" vs "Security Deposit").
+    facts = [(n.name, n.raw_value) for n in fieldsvc.iter_flat(tree) if n.node_kind == "scalar" and n.raw_value]
+    return built.leaves, built.pending, facts
 
-        if is_leaf:
-            norm = normalize.normalize(node.raw_value, _NORMALIZER_TYPE.get(node.data_type, VT_TEXT))
-            # A value we couldn't normalize is less trustworthy.
-            conf = node.confidence * (1.0 if norm.ok else 0.6)
-            threshold = node.threshold if node.threshold is not None else autoaccept
-            status = RV_AUTO_ACCEPTED if (conf >= threshold and node.raw_value) else RV_PENDING
-            # Per-leaf provenance: the model's quote first, the value as fallback.
-            loc = bbox_locator.locate_any(layout_units, [node.quote, node.raw_value], None)
 
-        row = FieldValue(
-            id=uuid.uuid5(uuid.NAMESPACE_URL,
-                          f"{run.document_id}:{run.document_version}:{doc_type.id}:{node.field_path}"),
-            tenant_id=run.tenant_id, document_id=run.document_id,
-            document_version=run.document_version, document_type_id=doc_type.id,
-            parent_id=parent_id, field_key=node.field_key, field_path=node.field_path,
-            field_name=node.name, node_kind=node.node_kind, ordinal=node.ordinal,
-            data_type=node.data_type,
-            raw_value=node.raw_value,
-            value_type=(norm.value_type if norm else node.data_type),
-            value_text=(norm.value_text if norm else None),
-            value_number=(norm.value_number if norm else None),
-            value_date=(norm.value_date if norm else None),
-            value_currency=(norm.value_currency if norm else None),
-            confidence=round(conf, 3),
-            source_page=(loc.get("page") if loc else None),
-            source_text=node.quote, source_bbox=loc,
-            review_status=status, model_version=usage.model,
-            prompt_version=prompts.PROMPT_VERSIONS["extract"], schema_version=schema.version)
-        db.add(row)
-        db.flush()
+def _discover_for_type(db, run, doc_type, schema, text, layout_units,
+                       known: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Discovery pass for one type: salient facts no schema field covers ("Entities").
 
-        if is_leaf:
-            written += 1
-            if status == RV_PENDING:
-                db.add(ReviewItem(
-                    tenant_id=run.tenant_id, document_id=run.document_id, kind=REVIEW_EXTRACTION,
-                    field_value_id=row.id, field_name=node.field_path, confidence=round(conf, 3),
-                    status=RV_PENDING,
-                    payload={"document_type": doc_type.name, "field_path": node.field_path,
-                             "raw_value": node.raw_value,
-                             "normalized_ok": bool(norm.ok) if norm else None}))
-                review_items += 1
+    `known` is everything already established for the document -- the fields read
+    under ALL of its types, plus whatever earlier types' passes discovered -- so a
+    fact one type already holds is not proposed again as "new" under another (a
+    deposit read as "Deposit Amount" by the lease type must not resurface as
+    "Security Deposit Amount" from the generic contract type). The model is told
+    what's known; a deterministic label/value check backs it up.
 
-        for child in node.children:
-            persist(child, row.id)
+    Returns the (label, value) pairs this pass added, for the next type to know about.
+    """
+    from app.ai.agents.structured import discover_entities
+    from app.services import fields as fieldsvc
 
-    for node in tree:
-        persist(node, None)
-
-    # --- discovery pass: salient facts the schema doesn't cover ("Entities") ---
+    added: list[tuple[str, str]] = []
     try:
-        # Ground the model with every fact ALREADY extracted — label and real
-        # value, including nested/list ones (e.g. "Tenants #2 PAN: ..."), not
-        # just top-level field names. Without the actual values, the model has
-        # no way to recognize a differently-worded restatement of a fact it
-        # already found (e.g. "Refundable Deposit Amount" vs "Security
-        # Deposit"), and duplicates it under a new name instead of skipping it.
-        known = [
-            (n.name, n.raw_value) for n in fieldsvc.iter_flat(tree)
-            if n.node_kind == "scalar" and n.raw_value
-        ][:60]
-        entities, disc_usage = discover_entities(text, known, doc_type.name)
+        entities, disc_usage = discover_entities(text, known[:_MAX_KNOWN_FACTS], doc_type.name)
         _record_cost(db, run, STAGE_METADATA, disc_usage)
         seen_keys: set[str] = set()
         for i, ent in enumerate(entities):
@@ -598,10 +614,10 @@ def _extract_for_type(db, run, stage, doc_type, schema, text, layout_units) -> t
                 source_bbox=loc, review_status=RV_PENDING, model_version=disc_usage.model,
                 prompt_version=prompts.PROMPT_VERSIONS["extract"], schema_version=schema.version,
                 is_discovered=True))
+            added.append((ent["name"], ent["value"]))
     except Exception as e:  # noqa: BLE001  discovery is best-effort
         log.warning("entity_discovery_failed", error=str(e)[:200])
-
-    return written, review_items
+    return added
 
 
 # ------------------------------------------------------ type default ACLs

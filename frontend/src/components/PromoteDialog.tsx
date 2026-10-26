@@ -2,11 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { FieldNode } from "./FieldTree";
 
+type Shape = "value" | "list" | "items" | "group";
+
+interface Column {
+  name: string;
+  data_type: string;
+}
+
 interface Suggestion {
   id: string;
   name: string;
   description: string;
   data_type: string;
+  shape?: Shape;
+  columns?: Column[];
   document_type_id: string;
   existing_key: string | null;
 }
@@ -22,7 +31,9 @@ interface Row {
   include: boolean;
   name: string;
   description: string;
-  data_type: string;
+  data_type: string; // a single value's type, or the type of each entry of a list
+  shape: Shape;
+  columns: Column[]; // for "items" and "group"
   document_type_id: string;
   existing_key: string; // "" = add as a new field
 }
@@ -33,6 +44,8 @@ export interface PromoteResult {
   name: string;
   created_field: boolean;
   schema_version: number | null;
+  shape?: Shape;
+  items?: number;
 }
 
 const DATA_TYPES: { value: string; label: string }[] = [
@@ -47,6 +60,18 @@ const DATA_TYPES: { value: string; label: string }[] = [
 ];
 const PLAIN = new Set(DATA_TYPES.map((d) => d.value));
 
+const SHAPES: { value: Shape; label: string; hint: string }[] = [
+  { value: "value", label: "Single value", hint: "One fact: a date, an amount, a name, a clause." },
+  { value: "list", label: "List of values", hint: "Several short values of one kind, e.g. languages." },
+  { value: "items", label: "List of items (table)", hint: "Several entries, each with columns, e.g. an item and its quantity." },
+  { value: "group", label: "Group of fields", hint: "One record made of named parts, e.g. an address." },
+];
+
+const DEFAULT_COLUMNS: Record<"items" | "group", Column[]> = {
+  items: [{ name: "Item", data_type: "string" }, { name: "Quantity", data_type: "integer" }],
+  group: [{ name: "Name", data_type: "string" }],
+};
+
 interface Props {
   docId: string;
   nodes: FieldNode[];
@@ -60,7 +85,9 @@ interface Props {
 
 /** Adds the document's new fields to a document type. Everything is pre-filled
  * (by the AI where available) and editable; nothing is saved until the
- * administrator confirms. */
+ * administrator confirms. A field that isn't a single value (a list of items,
+ * say) is read from the document again for just that field, since the value
+ * found so far is one string. */
 export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, onDone }: Props) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [types, setTypes] = useState<TypeRef[]>([]);
@@ -89,11 +116,16 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
         setUsedAi(!!res.ai);
         setRows(nodes.map((n) => {
           const s = byId.get(n.id);
+          const shape: Shape = s?.shape ?? "value";
           return {
             node: n, include: true,
             name: s?.name ?? n.field_name,
             description: s?.description ?? "",
             data_type: s && PLAIN.has(s.data_type) ? s.data_type : "string",
+            shape,
+            columns: (s?.columns && s.columns.length
+              ? s.columns
+              : shape === "items" || shape === "group" ? DEFAULT_COLUMNS[shape] : []),
             document_type_id: s?.document_type_id ?? home(n),
             existing_key: s?.existing_key ?? "",
           };
@@ -105,7 +137,7 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
         setUsedAi(false);
         setRows(nodes.map((n) => ({
           node: n, include: true, name: n.field_name, description: "", data_type: "string",
-          document_type_id: home(n), existing_key: "",
+          shape: "value" as Shape, columns: [], document_type_id: home(n), existing_key: "",
         })));
       });
     return () => { live = false; };
@@ -127,12 +159,44 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
     patch(i, { document_type_id: typeId, existing_key: "" });
   }
 
+  /** Switching shape keeps what makes sense: a table or group needs columns (seeded
+   * if there are none), and only a single value can be mapped onto an existing field. */
+  function changeShape(i: number, shape: Shape) {
+    setRows((rs) => rs && rs.map((r, j) => {
+      if (j !== i) return r;
+      const needsCols = shape === "items" || shape === "group";
+      return {
+        ...r, shape,
+        columns: needsCols && !r.columns.length ? DEFAULT_COLUMNS[shape as "items" | "group"] : r.columns,
+        existing_key: shape === "value" ? r.existing_key : "",
+      };
+    }));
+  }
+
+  const patchCol = (i: number, ci: number, p: Partial<Column>) =>
+    setRows((rs) => rs && rs.map((r, j) => (j !== i ? r : {
+      ...r, columns: r.columns.map((c, k) => (k === ci ? { ...c, ...p } : c)),
+    })));
+  const addCol = (i: number) =>
+    setRows((rs) => rs && rs.map((r, j) => (j !== i || r.columns.length >= 12 ? r : {
+      ...r, columns: [...r.columns, { name: "", data_type: "string" }],
+    })));
+  const removeCol = (i: number, ci: number) =>
+    setRows((rs) => rs && rs.map((r, j) => (j !== i ? r : { ...r, columns: r.columns.filter((_, k) => k !== ci) })));
+
   const chosen = (rows || []).filter((r) => r.include);
+  const structured = chosen.some((r) => r.shape !== "value");
 
   async function submit() {
     if (!chosen.length) return;
     if (chosen.some((r) => !r.existing_key && !r.name.trim())) {
       setError("Give every new field a name.");
+      return;
+    }
+    const bad = chosen.find((r) => (r.shape === "items" || r.shape === "group")
+      && !r.columns.some((c) => c.name.trim()));
+    if (bad) {
+      setError(`“${bad.name || bad.node.field_name}” needs at least one named column.`);
       return;
     }
     setBusy(true);
@@ -146,6 +210,10 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
           data_type: r.data_type,
           document_type_id: r.document_type_id,
           existing_key: r.existing_key || null,
+          shape: r.shape,
+          columns: r.shape === "items" || r.shape === "group"
+            ? r.columns.filter((c) => c.name.trim()).map((c) => ({ name: c.name.trim(), data_type: c.data_type }))
+            : null,
         })),
       });
       onDone(res.promoted);
@@ -179,6 +247,7 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
             {rows.map((r, i) => {
               const existing = plainFields(r.document_type_id);
               const mapped = r.existing_key ? existing.find((f) => f.key === r.existing_key) : undefined;
+              const shape = SHAPES.find((s) => s.value === r.shape)!;
               return (
                 <div key={r.node.id} className={`promote-row${r.include ? "" : " off"}`}>
                   <div className="promote-src">
@@ -195,7 +264,7 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
 
                   {r.include && (
                     <div className="promote-form">
-                      {existing.length > 0 && (
+                      {existing.length > 0 && r.shape === "value" && (
                         <div className="field">
                           <label>Treat as</label>
                           <select value={r.existing_key} disabled={busy}
@@ -222,18 +291,62 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
                                      onChange={(e) => patch(i, { name: e.target.value })} />
                             </div>
                             <div className="field">
-                              <label>Data type</label>
+                              <label>Shape</label>
+                              <select value={r.shape} disabled={busy}
+                                      onChange={(e) => changeShape(i, e.target.value as Shape)}>
+                                {SHAPES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                              </select>
+                            </div>
+                          </div>
+                          <div className="muted" style={{ fontSize: 12, margin: "-6px 0 10px" }}>{shape.hint}</div>
+
+                          {(r.shape === "value" || r.shape === "list") && (
+                            <div className="field" style={{ maxWidth: 220 }}>
+                              <label>{r.shape === "list" ? "Type of each value" : "Data type"}</label>
                               <select value={r.data_type} disabled={busy}
                                       onChange={(e) => patch(i, { data_type: e.target.value })}>
                                 {DATA_TYPES.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
                               </select>
                             </div>
-                          </div>
+                          )}
+
+                          {(r.shape === "items" || r.shape === "group") && (
+                            <div className="field">
+                              <label>
+                                Columns{" "}
+                                <span className="muted">
+                                  ({r.shape === "items" ? "each item becomes a row with these" : "the parts of the record"})
+                                </span>
+                              </label>
+                              {r.columns.map((c, ci) => (
+                                <div key={ci} className="col-row">
+                                  <input placeholder="Column name" value={c.name} disabled={busy}
+                                         onChange={(e) => patchCol(i, ci, { name: e.target.value })} />
+                                  <select value={c.data_type} disabled={busy}
+                                          onChange={(e) => patchCol(i, ci, { data_type: e.target.value })}>
+                                    {DATA_TYPES.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
+                                  </select>
+                                  <button type="button" className="ghost reject tiny" disabled={busy || r.columns.length <= 1}
+                                          title="Remove column" onClick={() => removeCol(i, ci)}>✕</button>
+                                </div>
+                              ))}
+                              <button type="button" className="secondary tiny" disabled={busy || r.columns.length >= 12}
+                                      onClick={() => addCol(i)}>+ Add column</button>
+                            </div>
+                          )}
+
                           <div className="field">
                             <label>Description <span className="muted">(tells the AI what to look for)</span></label>
                             <textarea rows={2} value={r.description} disabled={busy}
                                       onChange={(e) => patch(i, { description: e.target.value })} />
                           </div>
+
+                          {r.shape !== "value" && (
+                            <div className="muted" style={{ fontSize: 12 }}>
+                              The document will be read again for just this field, so it can be split into{" "}
+                              {r.shape === "group" ? "its parts" : "separate entries"}. Your other values aren't touched.
+                            </div>
+                          )}
                         </>
                       )}
 
@@ -263,7 +376,7 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
                 {created > 0 && `${created} new field${created === 1 ? "" : "s"} will be added`}
                 {created > 0 && created < count && " · "}
                 {created < count && `${count - created} mapped to existing`}
-                . Other documents pick them up when reprocessed.
+                . Other documents of the type can read them with “Extract new fields”.
               </>
             )}
             {rows && count === 0 && "Tick at least one field."}
@@ -274,7 +387,9 @@ export function PromoteDialog({ docId, nodes, docTypes, alternative, onClose, on
             )}
             <button className="ghost" onClick={onClose} disabled={busy}>Cancel</button>
             <button onClick={submit} disabled={busy || !rows || count === 0}>
-              {busy ? "Adding…" : count > 1 ? `Add ${count} fields & accept` : "Add field & accept"}
+              {busy
+                ? structured ? "Reading the document…" : "Adding…"
+                : count > 1 ? `Add ${count} fields & accept` : structured ? "Add field & read it" : "Add field & accept"}
             </button>
           </div>
         </div>

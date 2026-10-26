@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useLocation, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, API_BASE, tokenStore } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
@@ -11,6 +11,8 @@ import { FieldSections } from "../components/FieldSections";
 import { PromoteDialog, PromoteResult } from "../components/PromoteDialog";
 import { useAuth } from "../auth/AuthContext";
 import { TagEditor } from "../components/TagEditor";
+import { DocTypeChips } from "../components/DocTypeChips";
+import { DeleteDocumentDialog } from "../components/DeleteDocumentDialog";
 
 const STAGE_LABEL: Record<string, string> = {
   text_extraction: "Text Extraction",
@@ -51,6 +53,10 @@ export function DocumentDetail() {
   const isAdmin = user?.role === "administrator";
   const [promote, setPromote] = useState<{ nodes: FieldNode[]; thenAcceptRest: boolean } | null>(null);
   const [notice, setNotice] = useState("");
+  const [noticeIsError, setNoticeIsError] = useState(false);
+  const [extracting, setExtracting] = useState<string | null>(null); // type id being read
+  // Reading a type's new fields adds values to be reviewed: reviewers and admins.
+  const canExtract = user?.role === "administrator" || user?.role === "reviewer";
   const [viewerUrl, setViewerUrl] = useState<string>("");
   const [highlight, setHighlight] = useState<Highlight | null>(null);
   const [hlNonce, setHlNonce] = useState(0);
@@ -133,7 +139,8 @@ export function DocumentDetail() {
     refetchInterval: (q) => ((q.state.data as any)?.run?.status === "running" ? 2000 : false),
   });
 
-  const isPdf = doc?.file_type === "pdf";
+  // A PDF, or a Word/PowerPoint/image file the server has converted to one.
+  const isPdf = doc?.has_pdf ?? doc?.file_type === "pdf";
 
   // Live pipeline events over SSE (in addition to polling).
   useEffect(() => {
@@ -312,17 +319,83 @@ export function DocumentDetail() {
     }
   }
 
+  /** Read just the fields this type gained since the document was extracted. Unlike
+   * Reprocess, it adds values for those fields only and leaves everything reviewed
+   * or corrected alone. */
+  async function extractNewFields(typeId: string) {
+    setExtracting(typeId);
+    setNotice("");
+    try {
+      const res = await api.post(`/api/documents/${id}/fields/extract-new`, { document_type_id: typeId });
+      const found = res.extracted.filter((e: any) => e.found);
+      const empty = res.extracted.length - found.length;
+      setNoticeIsError(false);
+      setNotice(
+        `Read ${found.length} new field${found.length === 1 ? "" : "s"}` +
+          (empty ? ` · ${empty} found nothing in this document` : "") +
+          (res.pending_remaining ? ". New values that need a look are marked pending." : ".")
+      );
+      await refreshAfterReview();
+    } catch (e: any) {
+      setNoticeIsError(true);
+      setNotice(`Couldn't read the new fields: ${e.message || e}`);
+    } finally {
+      setExtracting(null);
+    }
+  }
+
+  const { data: allTypes } = useQuery({
+    queryKey: ["document-types"],
+    queryFn: () => api.get("/api/document-types"),
+    enabled: canExtract,
+  });
+  const [typeBusy, setTypeBusy] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  /** Fix a wrong or missing classification: add a type (reads its fields now) or remove one
+   * (deletes the data extracted under it). */
+  async function changeType(action: "add" | "remove", typeId: string) {
+    setTypeBusy(typeId);
+    setNotice("");
+    try {
+      if (action === "add") {
+        const res = await api.post(`/api/documents/${id}/types`, { document_type_id: typeId });
+        setNoticeIsError(false);
+        setNotice(`Added ${res.document_type} and read ${res.values} value${res.values === 1 ? "" : "s"}` +
+          (res.pending_remaining ? ". Some need a look and are marked pending." : "."));
+      } else {
+        const res = await api.del(`/api/documents/${id}/types/${typeId}`);
+        setNoticeIsError(false);
+        setNotice(`Removed ${res.document_type} and deleted its ${res.values_deleted} extracted value${res.values_deleted === 1 ? "" : "s"}.`);
+      }
+      await refreshAfterReview();
+    } catch (e: any) {
+      setNoticeIsError(true);
+      setNotice(`Couldn't ${action} the document type: ${e.message || e}`);
+    } finally {
+      setTypeBusy(null);
+    }
+  }
+
   async function onPromoted(results: PromoteResult[]) {
     const thenRest = promote?.thenAcceptRest;
     setPromote(null);
     const added = results.filter((r) => r.created_field);
+    const structured = results.filter((r) => r.shape && r.shape !== "value");
+    const simple = added.length - structured.length;
     const mapped = results.length - added.length;
     const types = [...new Set(results.map((r) => r.document_type_name))].join(", ");
+    const parts = [
+      simple > 0 && `Added ${simple} field${simple === 1 ? "" : "s"} to ${types}`,
+      ...structured.map((r) =>
+        `Added “${r.name}” to ${r.document_type_name} as ${r.shape === "group" ? "a group" : `a list of ${r.items ?? 0} ${r.items === 1 ? "entry" : "entries"}`}`),
+      mapped > 0 && `${mapped} mapped to existing field${mapped === 1 ? "" : "s"}`,
+    ].filter(Boolean);
+    setNoticeIsError(false);
     setNotice(
-      [added.length && `Added ${added.length} field${added.length === 1 ? "" : "s"} to ${types}`,
-       mapped && `${mapped} mapped to existing field${mapped === 1 ? "" : "s"}`]
-        .filter(Boolean).join(" · ") +
-        (added.length ? ". Reprocess other documents of this type to extract it there too." : ".")
+      parts.join(" · ") +
+        (added.length ? ". Other documents of this type can read it with “Extract new fields”." : ".")
     );
     qc.invalidateQueries({ queryKey: ["document-types"] });
     qc.invalidateQueries({ queryKey: ["document-type-detail"] });
@@ -442,13 +515,20 @@ export function DocumentDetail() {
                   {inProgress ? "Classifying…" : "Not classified"}
                 </span>
               )}
-              {(doc.document_types || []).map((t: any) => {
-                const c = (doc.classifications || []).find((x: any) => x.label === t.name);
-                const hint = !c ? undefined
-                  : c.source === "human" ? "Set manually"
-                  : `AI confidence ${Math.round((c.confidence || 0) * 100)}%`;
-                return <span key={t.id} className="pill" title={hint}>{t.name}</span>;
-              })}
+              <DocTypeChips
+                types={doc.document_types || []}
+                allTypes={allTypes || []}
+                canEdit={canExtract && !inProgress}
+                busyId={typeBusy}
+                onAdd={(tid) => changeType("add", tid)}
+                onRemove={(tid) => changeType("remove", tid)}
+                hintFor={(name) => {
+                  const c = (doc.classifications || []).find((x: any) => x.label === name);
+                  return !c ? undefined
+                    : c.source === "human" ? "Set manually"
+                    : `AI confidence ${Math.round((c.confidence || 0) * 100)}%`;
+                }}
+              />
             </div>
             <div className="meta-group meta-tags">
               <span className="muted tag-label">Tags</span>
@@ -472,6 +552,9 @@ export function DocumentDetail() {
           </button>
           <button className="secondary" onClick={openExternally}>Download</button>
           <button className="ghost" onClick={reprocess}>Reprocess</button>
+          {(isAdmin || doc.owner_id === user?.id) && (
+            <button className="ghost danger" onClick={() => setDeleteOpen(true)}>Delete</button>
+          )}
         </div>
       </div>
 
@@ -493,7 +576,11 @@ export function DocumentDetail() {
             )
           ) : (
             <div className="card" style={{ flex: 1 }}>
-              <div className="muted">In-browser preview is available for PDFs.</div>
+              <div className="muted">
+                {doc.processing_status === "pending" || doc.processing_status === "processing"
+                  ? "The preview appears once the file has been converted to PDF."
+                  : "No in-browser preview is available for this file type."}
+              </div>
               <a onClick={openExternally} style={{ cursor: "pointer" }}>
                 Download / open this {doc.file_type}
               </a>
@@ -540,14 +627,14 @@ export function DocumentDetail() {
             }
           >
             {notice && (
-              <div className="fs-notice">
+              <div className={`fs-notice${noticeIsError ? " err" : ""}`}>
                 <span>{notice}</span>
                 <button className="ghost tiny" onClick={() => setNotice("")}>✕</button>
               </div>
             )}
             <FieldSections
               fields={(doc.fields || []) as FieldNode[]}
-              docTypes={(doc.document_types || []).map((t: any) => ({ id: t.id, name: t.name }))}
+              docTypes={(doc.document_types || []).map((t: any) => ({ id: t.id, name: t.name, newFields: t.new_fields || [] }))}
               isPdf={isPdf}
               reviewing={reviewing}
               onJump={jumpToField}
@@ -556,6 +643,9 @@ export function DocumentDetail() {
               onDelete={deleteItem}
               canPromote={isAdmin}
               onPromote={(nodes) => setPromote({ nodes, thenAcceptRest: false })}
+              canExtract={canExtract}
+              extractingType={extracting}
+              onExtract={extractNewFields}
             />
           </CollapsibleSection>
 
@@ -577,6 +667,19 @@ export function DocumentDetail() {
           )}
         </div>
       </div>
+
+      {deleteOpen && (
+        <DeleteDocumentDialog
+          docs={[{ id: id!, name: doc.name }]}
+          onClose={() => setDeleteOpen(false)}
+          onDeleted={() => {
+            qc.invalidateQueries({ queryKey: ["documents"] });
+            qc.invalidateQueries({ queryKey: ["dashboard"] });
+            qc.invalidateQueries({ queryKey: ["review"] });
+            navigate("/documents");
+          }}
+        />
+      )}
 
       {promote && (
         <PromoteDialog

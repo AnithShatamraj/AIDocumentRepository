@@ -610,6 +610,46 @@ def migrate_legacy_tenant_data(dest_slug: str, dry_run: bool = True, legacy_buck
     print("\nMigration verified successfully.")
 
 
+def prune_discovered(slug: str, execute: bool = False, document_id: str | None = None) -> None:
+    """Remove "new" (discovered) fields that only restate a field already read for
+    the same document -- e.g. a "Security Deposit Amount" suggestion beside the lease
+    type's own "Deposit Amount". New uploads no longer produce these; this clears the
+    ones left from before. Dry run unless `execute`. Only suggestions nobody has
+    accepted (pending or rejected) are ever removed."""
+    from app.models.content import FieldValue
+    from app.models.document import Document
+    from app.services import discovery_dedupe
+
+    configure_logging(settings.log_level)
+    mgmt_db = MgmtSyncSessionLocal()
+    try:
+        tenant = mgmt_db.query(MgmtTenant).filter(MgmtTenant.slug == slug).first()
+        if tenant is None:
+            print(f"no such tenant: {slug!r}")
+            sys.exit(1)
+        engine = create_engine(_tenant_url(tenant), future=True)
+        total = 0
+        with sessionmaker(bind=engine, future=True)() as db:
+            q = db.query(Document.id, Document.name).filter(
+                Document.id.in_(db.query(FieldValue.document_id).filter(FieldValue.is_discovered.is_(True))))
+            if document_id:
+                q = q.filter(Document.id == uuid.UUID(document_id))
+            for doc_id, name in q.order_by(Document.name).all():
+                plan = discovery_dedupe.prune_document(db, doc_id, execute=execute)
+                for p in plan:
+                    total += 1
+                    print(f"{name}\n    {'removed' if execute else 'would remove'}: “{p.candidate.name}” = "
+                          f"{p.candidate.value[:60]!r} [{p.candidate.status}]\n"
+                          f"    restates: “{p.restates[0]}” = {p.restates[1][:60]!r}")
+            if execute:
+                db.commit()
+        verb = "removed" if execute else "would remove"
+        print(f"\n{verb} {total} redundant new field(s)." + ("" if execute else " Re-run with --execute to apply."))
+        engine.dispose()
+    finally:
+        mgmt_db.close()
+
+
 def main() -> None:
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "seed":
@@ -635,6 +675,12 @@ def main() -> None:
         migrate_tenant(sys.argv[2])
     elif cmd == "migrate-all-tenants":
         migrate_all_tenants()
+    elif cmd == "prune-discovered":
+        if len(sys.argv) < 3:
+            print("usage: python -m app.cli prune-discovered <slug> [--execute] [--document=<uuid>]")
+            sys.exit(1)
+        doc_arg = next((a.split("=", 1)[1] for a in sys.argv[3:] if a.startswith("--document=")), None)
+        prune_discovered(sys.argv[2], execute="--execute" in sys.argv[3:], document_id=doc_arg)
     elif cmd == "migrate-legacy-tenant":
         if len(sys.argv) < 3:
             print("usage: python -m app.cli migrate-legacy-tenant <dest-slug> [--execute]")
@@ -643,7 +689,7 @@ def main() -> None:
     else:
         print("usage: python -m app.cli [seed|migrate|create-mgmt-db|migrate-mgmt|"
               "provision-tenant <slug> <name> [--seed]|migrate-tenant <slug>|migrate-all-tenants|"
-              "migrate-legacy-tenant <dest-slug> [--execute]]")
+              "migrate-legacy-tenant <dest-slug> [--execute]|prune-discovered <slug> [--execute] [--document=<uuid>]]")
         sys.exit(1)
 
 

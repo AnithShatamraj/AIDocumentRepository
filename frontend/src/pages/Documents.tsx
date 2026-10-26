@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
 import { UploadDialog } from "../components/UploadDialog";
+import { DeleteDocumentDialog } from "../components/DeleteDocumentDialog";
 import { TagEditor, useTagSuggestions } from "../components/TagEditor";
 import { SearchPanel } from "./Search";
 import { CheckList, FilterPopover } from "../components/ColumnFilter";
@@ -83,6 +84,7 @@ function matches(d: any, f: Filters): boolean {
 
 export function Documents() {
   const qc = useQueryClient();
+  const [deleting, setDeleting] = useState<{ id: string; name: string }[] | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [msg, setMsg] = useState<string>("");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -259,6 +261,11 @@ export function Documents() {
             Remove from selected
           </button>
           <button className="ghost" onClick={() => setSelected(new Set())}>Clear selection</button>
+          <button className="ghost danger bulk-delete"
+                  onClick={() => setDeleting((data || []).filter((d: any) => selected.has(d.id))
+                    .map((d: any) => ({ id: d.id, name: d.name })))}>
+            Delete…
+          </button>
         </div>
       )}
 
@@ -396,6 +403,24 @@ export function Documents() {
           </tbody>
         </table>
       </div>
+
+      {deleting && (
+        <DeleteDocumentDialog
+          docs={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={({ deleted, skipped }) => {
+            setDeleting(null);
+            setSelected(new Set());
+            setMsg(
+              `Deleted ${deleted} document${deleted === 1 ? "" : "s"}.` +
+                (skipped ? ` ${skipped} could not be deleted — you don’t have permission to delete them.` : "")
+            );
+            qc.invalidateQueries({ queryKey: ["documents"] });
+            qc.invalidateQueries({ queryKey: ["dashboard"] });
+            qc.invalidateQueries({ queryKey: ["tags"] });
+          }}
+        />
+      )}
     </div>
   );
 }

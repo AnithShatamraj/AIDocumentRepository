@@ -3,7 +3,8 @@ import { FieldNode, FieldTree } from "./FieldTree";
 
 interface Props {
   fields: FieldNode[];
-  docTypes: { id: string; name: string }[];
+  /** `newFields`: fields the type gained after this document was read (nothing extracted for them yet). */
+  docTypes: { id: string; name: string; newFields?: { key: string; name: string }[] }[];
   isPdf: boolean;
   reviewing: Record<string, boolean>;
   onJump: (n: FieldNode) => void;
@@ -14,6 +15,11 @@ interface Props {
   canPromote: boolean;
   /** Open the add-to-type dialog for these new fields. */
   onPromote: (nodes: FieldNode[]) => void;
+  /** Reviewers and administrators can read just a type's new fields from the document. */
+  canExtract: boolean;
+  /** The type currently being read, to show progress and block a second click. */
+  extractingType: string | null;
+  onExtract: (typeId: string) => void;
 }
 
 // Each document type gets its own hue (cycling), so one type is told from the next
@@ -48,16 +54,18 @@ function dedupeNew(nodes: FieldNode[]): FieldNode[] {
  * can be promoted into a type. */
 export function FieldSections({
   fields, docTypes, isPdf, reviewing, onJump, onReview, onEdit, onDelete, canPromote, onPromote,
+  canExtract, extractingType, onExtract,
 }: Props) {
   const [closed, setClosed] = useState<Record<string, boolean>>({});
 
   const sections = useMemo(() => {
     const schemaNodes = fields.filter((f) => !f.is_discovered);
     const known = new Set(docTypes.map((t) => t.id));
-    const out: { id: string; title: string; nodes: FieldNode[]; hue: string; isNew?: boolean; empty?: string }[] = docTypes.map((t, i) => ({
+    const out: { id: string; title: string; nodes: FieldNode[]; hue: string; isNew?: boolean; empty?: string; newFields?: { key: string; name: string }[] }[] = docTypes.map((t, i) => ({
       id: t.id,
       title: t.name,
       hue: String(i % TYPE_HUES),
+      newFields: t.newFields ?? [],
       nodes: schemaNodes.filter((f) => f.document_type_id === t.id),
       empty: "Nothing extracted for this type yet.",
     }));
@@ -96,6 +104,22 @@ export function FieldSections({
               <strong>{s.title}</strong>
               <span className="pill">{s.nodes.length}</span>
               {pending > 0 && <span className="pill pending">{pending} pending</span>}
+              {(s.newFields?.length ?? 0) > 0 && (
+                <span className="fs-actions" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    className="promote-btn"
+                    disabled={!canExtract || extractingType !== null}
+                    title={canExtract
+                      ? `Read just ${s.newFields!.map((f) => f.name).join(", ")} from the document. Your other values aren't touched.`
+                      : "Only a reviewer or administrator can extract fields"}
+                    onClick={() => onExtract(s.id)}
+                  >
+                    {extractingType === s.id
+                      ? "Reading the document…"
+                      : `⟳ Extract ${s.newFields!.length} new field${s.newFields!.length === 1 ? "" : "s"}`}
+                  </button>
+                </span>
+              )}
               {s.isNew && addable.length > 0 && (
                 <span className="fs-actions" onClick={(e) => e.stopPropagation()}>
                   <button
@@ -114,6 +138,14 @@ export function FieldSections({
 
             {open && (
               <div className="fs-body">
+                {(s.newFields?.length ?? 0) > 0 && (
+                  <div className="fs-note muted">
+                    Added to this type after this document was read: {s.newFields!.map((f) => f.name).join(", ")}.
+                    {canExtract
+                      ? " Extract them to read just those fields — everything already here stays as it is."
+                      : " A reviewer or administrator can extract them."}
+                  </div>
+                )}
                 {s.isNew && (
                   <div className="fs-note muted">
                     Found by the AI, but not defined by any document type. Add each one to a type to accept it —

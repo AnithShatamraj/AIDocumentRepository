@@ -28,6 +28,8 @@ data:
   EMBEDDING_MODEL: "text-embedding-3-small"
   EMBEDDING_DIM: "1536"
   INGESTION_USE_DEEPAGENTS: "true"
+  DOCLING_URL: "http://aidocs-docling:5001"
+  GOTENBERG_URL: "http://aidocs-gotenberg:3000"
 ---
 # Secrets are placeholders — inject via Azure Key Vault (CSI) or sealed-secrets.
 apiVersion: v1

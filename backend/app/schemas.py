@@ -138,6 +138,10 @@ class BulkTagRequest(BaseModel):
     remove: list[str] = []
 
 
+class BulkDeleteRequest(BaseModel):
+    document_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
 class DocumentOut(BaseModel):
     id: uuid.UUID
     name: str
@@ -170,8 +174,15 @@ class DocumentListItem(DocumentOut):
     document_types: list[DocumentTypeRef] = []
 
 
+class DocumentTypeInDocument(DocumentTypeOut):
+    """A document's type, plus the fields the type gained after this document was read."""
+    new_fields: list[dict] = []
+    value_count: int = 0  # values extracted under this type; what removing it would delete
+
+
 class DocumentDetail(DocumentOut):
-    document_types: list[DocumentTypeOut] = []
+    has_pdf: bool = False  # the original is a PDF, or a PDF rendition was made from it
+    document_types: list[DocumentTypeInDocument] = []
     summary: dict | None = None
     fields: list[dict] = []
     extractions: list[dict] = []  # deprecated flat alias
@@ -312,6 +323,12 @@ class FieldSuggestRequest(BaseModel):
     field_value_ids: list[uuid.UUID] = Field(min_length=1, max_length=30)
 
 
+class PromoteColumn(BaseModel):
+    name: str
+    data_type: str = "string"
+    description: str = ""
+
+
 class PromoteFieldItem(BaseModel):
     field_value_id: uuid.UUID
     name: str
@@ -320,6 +337,11 @@ class PromoteFieldItem(BaseModel):
     document_type_id: uuid.UUID
     # Map onto this existing field of the type instead of adding a new one.
     existing_key: str | None = None
+    # value | list | items | group. Anything but "value" is read from the document
+    # again (a string can't be turned into a list by retyping it); "items" and
+    # "group" use `columns`, "list" uses `data_type` for its values.
+    shape: str = "value"
+    columns: list[PromoteColumn] | None = Field(default=None, max_length=12)
 
 
 class PromoteFieldsRequest(BaseModel):
@@ -342,3 +364,13 @@ class ThresholdUpdate(BaseModel):
 class PromptVersionCreate(BaseModel):
     key: str
     template: str
+
+
+class AddDocumentTypeRequest(BaseModel):
+    document_type_id: uuid.UUID
+
+
+class ExtractNewFieldsRequest(BaseModel):
+    document_type_id: uuid.UUID
+    # Limit to these fields of the type; omit to read every field the document is missing.
+    keys: list[str] | None = Field(default=None, max_length=50)

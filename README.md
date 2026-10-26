@@ -42,6 +42,22 @@ to per-page **blocks with top-left-origin bounding boxes**, which power:
   textless PDF yields nothing from the standard pass);
 - the `GET /documents/{id}/layout` endpoint for viewer overlays.
 
+### Other formats (converted to PDF first)
+
+Word (`.docx`, `.doc`), PowerPoint (`.pptx`, `.ppt`), OpenDocument (`.odt`, `.odp`),
+RTF and images (`.png`, `.jpg`, `.tif/.tiff`, `.bmp`, `.gif`, `.webp`) are converted to a
+PDF **rendition** in the `text_extraction` stage, then follow the PDF path above — so they
+get the same layout, OCR, bounding boxes and click-to-highlight, and the viewer shows the
+rendition. The original is kept untouched and is what **Download** returns.
+
+Only permissively licensed components are used (no copyleft or per-seat terms):
+**Gotenberg** (MIT) wrapping **LibreOffice** (MPL-2.0) for Office files — the `gotenberg`
+compose service / `k8s/gotenberg.yaml`, scaled apart from the workers — and **Pillow**
+(HPND) for images, in-process (multi-page TIFFs become multi-page PDFs). Settings:
+`GOTENBERG_URL`, `CONVERSION_TIMEOUT_SECONDS`, `MAX_IMAGE_PIXELS`. If Word/PowerPoint
+conversion fails the file is still read natively (text only, no preview); any other
+format fails the stage visibly. `GET /documents/{id}` reports `has_pdf`.
+
 Uploads of truncated PDFs (missing `%%EOF`) are rejected at validation, and a
 PDF that still produces no text **fails the pipeline visibly** (dead-letter)
 instead of silently proceeding with empty input. Scale `docling` independently
