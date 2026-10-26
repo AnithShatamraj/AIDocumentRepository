@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     docling_ocr: Literal["auto", "force", "off"] = "auto"
     docling_timeout_seconds: int = 1800  # full-page OCR of large scans is slow on CPU
 
+    # Word/PowerPoint/OpenDocument/RTF -> PDF via Gotenberg (LibreOffice); images via Pillow.
+    gotenberg_url: str = "http://localhost:3000"
+    conversion_timeout_seconds: int = 300
+    max_image_pixels: int = 120_000_000  # per frame; larger is refused as a decompression bomb
+
     # --- Pipeline / processing ---
     max_upload_mb: int = 50
     chunk_tokens: int = 800

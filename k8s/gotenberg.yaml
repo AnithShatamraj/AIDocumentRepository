@@ -1,0 +1,43 @@
+# Gotenberg (MIT; wraps LibreOffice, MPL-2.0): converts Word/PowerPoint/OpenDocument/RTF
+# uploads to PDF for the worker. Internal only -- never expose this service. Scale it
+# apart from the workers; each conversion is a LibreOffice process.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aidocs-gotenberg
+  namespace: aidocs
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: aidocs-gotenberg }
+  template:
+    metadata:
+      labels: { app: aidocs-gotenberg }
+    spec:
+      containers:
+        - name: gotenberg
+          image: gotenberg/gotenberg:8
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet: { path: /health, port: 3000 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /health, port: 3000 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits: { cpu: "2", memory: "3Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aidocs-gotenberg
+  namespace: aidocs
+spec:
+  selector: { app: aidocs-gotenberg }
+  ports:
+    - port: 3000
+      targetPort: 3000

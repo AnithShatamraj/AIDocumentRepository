@@ -55,7 +55,7 @@ from app.models.type_draft import (
     DocumentTypeDraftMessage,
     DocumentTypeDraftSample,
 )
-from app.services import audit, parsing
+from app.services import audit, conversion, parsing
 from app.services import fields as fieldsvc
 from app.services.type_catalog import NameTaken, create_document_type, name_exists
 
@@ -764,6 +764,13 @@ async def process_sample(tenant, sample_id: uuid.UUID, data: bytes, ext: str) ->
     Runs after the upload response is sent, so a slow OCR never blocks it."""
     text, pages, error = "", None, None
     try:
+        if conversion.needs_conversion(ext):
+            try:  # same route as real documents: read the PDF rendition
+                data, ext = await asyncio.to_thread(conversion.to_pdf, data, ext), "pdf"
+            except conversion.ConversionError as e:
+                if ext not in ("docx", "pptx"):
+                    raise
+                log.warning("type_builder_sample_conversion_fallback", error=str(e)[:300])
         result = await asyncio.to_thread(parsing.parse, data, ext)
         text = (result.get("text") or "").strip()
         pages = len(result.get("units") or []) or None

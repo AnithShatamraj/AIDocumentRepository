@@ -146,3 +146,124 @@ def test_unique_key_avoids_collisions():
     assert unique_key("Stamp Duty", {"stamp_duty"}) == "stamp_duty_2"
     assert unique_key("Stamp Duty", {"stamp_duty", "stamp_duty_2"}) == "stamp_duty_3"
     assert len(unique_key("x" * 80, {"x" * 63})) <= 63
+
+
+def _flat_items_tree():
+    """furniture: list of {item, quantity}, as flatten_response would produce it."""
+    from app.services.fields import flatten_response, validate_schema
+
+    defs = validate_schema([{
+        "key": "furniture", "name": "Furniture", "data_type": "list",
+        "item": {"key": "furniture_item", "name": "Furniture item", "data_type": "object", "fields": [
+            {"key": "item", "name": "Item", "data_type": "string"},
+            {"key": "quantity", "name": "Quantity", "data_type": "integer"}]}}])
+    payload = {"furniture": [
+        {"item": {"value": "Fan", "confidence": 0.95, "quote": "Fan: 4"},
+         "quantity": {"value": "4", "confidence": 0.95, "quote": "Fan: 4"}},
+        {"item": {"value": "Bulb", "confidence": 0.4, "quote": None},
+         "quantity": {"value": "five", "confidence": 0.9, "quote": None}}]}
+    return flatten_response(defs, payload)
+
+
+def test_build_rows_links_parents_and_flags_what_needs_review():
+    import uuid
+
+    from app.models.constants import RV_AUTO_ACCEPTED, RV_PENDING
+    from app.services.extraction_rows import build_rows, row_id
+
+    ids = dict(tenant_id=uuid.uuid4(), document_id=uuid.uuid4(), doc_type_id=uuid.uuid4())
+    built = build_rows(_flat_items_tree(), document_version=1, doc_type_name="Lease", schema_version=3,
+                       model="m", prompt_version="p", layout_units=[], autoaccept=0.85, **ids)
+    by_path = {f.field_path: f for f in built.fields}
+    # Parents come before children, and children point at their parent's deterministic id.
+    order = [f.field_path for f in built.fields]
+    assert order.index("furniture") < order.index("furniture[0]") < order.index("furniture[0].item")
+    assert by_path["furniture[0].item"].parent_id == by_path["furniture[0]"].id
+    assert by_path["furniture[0]"].parent_id == by_path["furniture"].id
+    assert by_path["furniture"].id == row_id(ids["document_id"], 1, ids["doc_type_id"], "furniture")
+    assert all(f.schema_version == 3 for f in built.fields)
+    # A confident value is auto-accepted; a low-confidence or un-normalisable one goes to review.
+    assert by_path["furniture[0].item"].review_status == RV_AUTO_ACCEPTED
+    assert by_path["furniture[1].item"].review_status == RV_PENDING          # confidence 0.4
+    assert by_path["furniture[1].quantity"].review_status == RV_PENDING      # "five" isn't an integer
+    assert built.leaves == 4 and built.pending == 2 and len(built.reviews) == 2
+    assert {r.field_value_id for r in built.reviews} == {
+        by_path["furniture[1].item"].id, by_path["furniture[1].quantity"].id}
+
+
+def test_build_field_def_makes_a_valid_schema_node_for_every_shape():
+    import pytest
+
+    from app.services.field_promotion import build_field_def
+    from app.services.fields import ensure_keys, validate_schema
+
+    cols = [{"name": "Item", "data_type": "string"}, {"name": "Quantity", "data_type": "integer"},
+            {"name": "item", "data_type": "string"}]  # a duplicate name must still get a unique key
+
+    value = build_field_def("deposit", "Deposit", "d", "value", "currency")
+    assert value["data_type"] == "currency"
+    lst = build_field_def("languages", "Languages", "", "list", "string")
+    assert lst["data_type"] == "list" and lst["item"]["data_type"] == "string"
+    items = build_field_def("furniture", "Furniture", "", "items", "string", cols)
+    assert items["data_type"] == "list" and items["item"]["data_type"] == "object"
+    keys = [c["key"] for c in items["item"]["fields"]]
+    assert keys == ["item", "quantity", "item_2"]
+    group = build_field_def("address", "Address", "", "group", "string", cols[:2])
+    assert group["data_type"] == "object" and [c["key"] for c in group["fields"]] == ["item", "quantity"]
+    # Each is something the real validator (and so the extractor) accepts.
+    validate_schema(ensure_keys([value, lst, items, group]))
+
+    for bad in (dict(shape="items", columns=[]), dict(shape="group", columns=[{"name": " "}]),
+                dict(shape="items", columns=[{"name": "A", "data_type": "object"}]),
+                dict(shape="table"), dict(shape="value", data_type="object"),
+                dict(shape="items", columns=[{"name": f"c{i}"} for i in range(13)])):
+        with pytest.raises(ValueError):
+            build_field_def("k", "Name", "", bad.pop("shape"), bad.pop("data_type", "string"), bad.pop("columns", None))
+
+
+def test_infer_shape_recognises_packed_lists():
+    from app.ai.field_suggest import infer_shape
+
+    assert infer_shape("Fan: 4, Tube light: 1, Bed: 2")[0] == "items"
+    assert infer_shape("5 Fans, 10 Tube lights")[0] == "items"
+    assert [c["name"] for c in infer_shape("Fan: 4, Bed: 2")[1]] == ["Item", "Quantity"]
+    assert infer_shape("Hindi, English, Marathi")[0] == "list"
+    assert infer_shape("Residential purpose only")[0] == "value"
+    assert infer_shape("Rs. 14,000, payable monthly")[0] == "value"   # two parts, not a series of entries
+    assert infer_shape("")[0] == "value"
+
+
+def test_suggested_shape_is_validated_and_falls_back_safely():
+    from app.ai.field_suggest import Fact, TypeInfo, _clean
+
+    types = [TypeInfo("t1", "Lease", "", [{"key": "license_fee", "name": "License Fee", "data_type": "currency"}])]
+    fact = Fact("f1", "Furniture and Appliances", "Fan: 4, Tube light: 1", "", "t1")
+    ok = _clean({"shape": "items", "columns": [{"name": "Item", "data_type": "string"},
+                                               {"name": "Qty", "data_type": "money"}]}, fact, types)
+    assert ok["shape"] == "items"
+    assert ok["columns"] == [{"name": "Item", "data_type": "string"}, {"name": "Qty", "data_type": "string"}]
+    # A made-up shape, or a table with no usable columns, falls back to what the text itself suggests.
+    assert _clean({"shape": "carousel"}, fact, types)["shape"] == "items"
+    bare = _clean({"shape": "items", "columns": []}, fact, types)
+    assert bare["shape"] == "items" and [c["name"] for c in bare["columns"]] == ["Item", "Quantity"]
+    # ...and with nothing to suggest columns from, it becomes a single value rather than an empty table.
+    plain = Fact("f2", "Use of Premises", "Residential purpose only", "", "t1")
+    assert _clean({"shape": "items", "columns": []}, plain, types)["shape"] == "value"
+    # A list or group is never "the same as" an existing single field.
+    same = Fact("f3", "License Fee", "Fan: 4, Bed: 2", "", "t1")
+    assert _clean({"shape": "items", "columns": [{"name": "Item"}], "existing_key": "license_fee"}, same, types)["existing_key"] is None
+
+
+def test_empty_containers_mark_a_list_that_was_asked_for_but_found_empty():
+    from app.services.extraction_rows import BuiltRows
+    from app.services.field_extraction import empty_containers
+    from app.services.fields import validate_schema
+
+    defs = validate_schema([
+        {"key": "owner", "name": "Owner", "data_type": "string"},
+        {"key": "witnesses", "name": "Witnesses", "data_type": "list",
+         "item": {"key": "witness", "name": "Witness", "data_type": "string"}},
+        {"key": "address", "name": "Address", "data_type": "object",
+         "fields": [{"key": "city", "name": "City", "data_type": "string"}]}])
+    got = empty_containers(defs, BuiltRows())
+    assert [(c.field_path, c.node_kind) for c in got] == [("witnesses", "list"), ("address", "object")]

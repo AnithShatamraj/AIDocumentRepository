@@ -12,7 +12,7 @@ PROMPT_VERSIONS = {
     # v2: cite every factual sentence, and state what could not be found
     # instead of quietly answering only the easy half of the question.
     "chat": "chat@v5",
-    "field_suggest": "field_suggest@v1",
+    "field_suggest": "field_suggest@v2",
     "rewrite": "rewrite@v1",
     "verify": "verify@v2",
 }
@@ -144,11 +144,24 @@ document belongs to, each with the fields it already has. For every fact return:
 never this document's value. Keep the given label if it is already good.
 - "description": ONE sentence telling an extractor what to look for and where it usually appears. Generic: no \
 names, amounts, dates or other values from this document.
-- "data_type": one of string, number, integer, currency, date, datetime, time, boolean. Use string for free text.
+- "shape": how the information is structured. Look at the VALUE:
+    "value" - one fact (a date, an amount, a name, a clause of text);
+    "list"  - several short values of the same kind (e.g. "Hindi, English, Marathi");
+    "items" - several entries that each have more than one attribute, like table rows \
+(e.g. "Fan: 4, Tube light: 1, Bed: 2" is entries of an item name AND a quantity);
+    "group" - one record made of several named parts (e.g. an address: street, city, pincode).
+  Choose "items"/"list" when the value is clearly a series packed into one string; do not split a sentence of \
+prose into pieces. When unsure, "value".
+- "columns": only for "items" and "group": 2-6 columns, each {"name": "<Title Case>", "data_type": "<type>"}, \
+for example [{"name": "Item", "data_type": "string"}, {"name": "Quantity", "data_type": "integer"}]. Otherwise [].
+- "data_type": one of string, number, integer, currency, date, datetime, time, boolean. For "value" it is the \
+value's type; for "list" the type of each entry; ignored for "items" and "group". Use string for free text.
 - "document_type_id": the id of the document type this field belongs in (from the list). Prefer the fact's \
 "current_type_id" unless another listed type is clearly a better home.
 - "existing_key": the key of an EXISTING field of the chosen type ONLY IF the fact is the same piece of \
-information as that field (same meaning, different wording). Otherwise null. When unsure, null.
+information as that field (same meaning, different wording) and the shape is "value". Otherwise null. \
+When unsure, null.
 
 Return STRICT JSON: {"suggestions": [{"id": "<fact id>", "name": "...", "description": "...", \
-"data_type": "...", "document_type_id": "<id>", "existing_key": null}]} with one entry per fact, in any order."""
+"shape": "value", "columns": [], "data_type": "...", "document_type_id": "<id>", "existing_key": null}]} \
+with one entry per fact, in any order."""
