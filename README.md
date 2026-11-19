@@ -95,6 +95,9 @@ metadata_extraction → chunking → embedding`
 - **Docker Desktop** (for Postgres, Redis, MinIO — and, on Windows, the backend too).
 - **Node 20+** (to run the React dev server natively).
 - Python is **not** required on the host — the backend runs in a container.
+  Dependencies are managed with [uv](https://docs.astral.sh/uv/) (`backend/pyproject.toml` + `uv.lock`).
+  To work outside Docker (e.g. run tests): `cd backend && uv sync && uv run pytest`.
+  After changing dependencies, run `uv lock` and commit `uv.lock`.
 
 ---
 
