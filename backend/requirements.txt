@@ -16,6 +16,7 @@ alembic==1.14.0
 
 # --- Background jobs ---
 celery[redis]==5.4.0
+kombu==5.4.2  # celery 5.4 only floors kombu; 5.6+ needs redis-py >= 6.1 (pinned below at 5.2.1)
 redis==5.2.1
 
 # --- Auth ---
